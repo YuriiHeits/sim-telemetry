@@ -1,0 +1,11 @@
+# Build artifacts
+_build/
+__pycache__/
+*.pyc
+*.spec
+
+# Telemetry data — generated logs, large and ever-growing
+*.csv
+
+# Built binary — rebuild from gg_logger_gui.pyw via PyInstaller
+GGLogger.exe
