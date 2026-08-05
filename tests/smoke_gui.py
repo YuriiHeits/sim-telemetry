@@ -58,5 +58,22 @@ print("laps left:", app.fuel_left.cget("text"))
 print("to session end:", app.fuel_end.cget("text"))
 print("plan:", app.fuel_plan.cget("text"))
 
+# plan entry: typing a value and hitting Enter must repaint and drop focus.
+# The real logger.cfg belongs to the user, so put back whatever was there.
+original_plan = app.plan_var.get()
+app.plan_var.set("45")
+app.plan_entry.focus_set()
+root.update_idletasks()
+app._save_plan()
+root.update_idletasks()
+print("plan after Enter:", app.plan_var.get(), "| litres:", app.fuel_plan.cget("text"),
+      "| entry still focused:", root.focus_get() is app.plan_entry)
+app.plan_var.set("9999")
+app._save_plan()
+print("plan clamped:", app.plan_var.get())
+app.plan_var.set(original_plan)
+app._save_plan()
+print("plan restored to:", app.plan_var.get())
+
 app.quit()
 print("OK")

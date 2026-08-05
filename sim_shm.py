@@ -240,8 +240,11 @@ CORE_COLS = ["t", "lap", "pos", "speed_kmh", "rpm", "gear", "gas", "brake", "ste
 AC_EXTRA_COLS = ["camber_fl", "camber_fr", "camber_rl", "camber_rr",
                  "dirt_fl", "dirt_fr", "dirt_rl", "dirt_rr", "tyres_out", "drs"]
 
+# No in_pitlane column on purpose: the file is finalized the moment the pit lane
+# is entered, so no row with in_pitlane=1 can ever be written. Confirmed on a live
+# session before it was dropped.
 ACC_EXTRA_COLS = ["btemp_fl", "btemp_fr", "btemp_rl", "btemp_rr",
-                  "in_pitlane", "ideal_line", "valid_lap", "fuel_x_lap", "fuel_est_laps"]
+                  "ideal_line", "valid_lap", "fuel_x_lap", "fuel_est_laps"]
 
 
 def cols_for(game):
@@ -339,6 +342,6 @@ class SimReader:
             out += [p.numberOfTyresOut, _f(p.drs, 2)]
         else:
             out += _f4(p.brakeTemp, 1)
-            out += [g.isInPitLane, g.idealLineOn, g.isValidLap,
+            out += [g.idealLineOn, g.isValidLap,
                     _f(g.fuelXLap, 3), _f(g.fuelEstimatedLaps, 2)]
         return out

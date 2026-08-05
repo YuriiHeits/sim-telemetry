@@ -277,6 +277,8 @@ class App:
         self.lap_had_pit = False
         self.lap_invalid = False    # latched: set the moment the game says invalid
         self.fuel = FuelModel()
+        self.last_fuel = None       # last seen telemetry, kept so the fuel block can
+        self.last_session_ms = None # be repainted while parked (e.g. plan edited)
         self.neck_mode = read_neck_mode(NECK_INI)
         self.tray = None
         self._build()
@@ -371,12 +373,16 @@ class App:
         planwrap.grid(row=2, column=0, sticky="w", padx=8, pady=1)
         self._lab(planwrap, "PLAN", fg=MUTED, font=("Segoe UI", 9), bg=CARD).pack(side="left")
         self.plan_var = tk.StringVar(value=str(load_plan_minutes()))
-        ent = tk.Entry(planwrap, textvariable=self.plan_var, width=4, justify="center",
-                       bg=BG, fg=TEXT, insertbackground=TEXT, relief="flat",
-                       font=("Consolas", 10))
-        ent.pack(side="left", padx=4)
-        ent.bind("<Return>", lambda e: self._save_plan())
-        ent.bind("<FocusOut>", lambda e: self._save_plan())
+        self.plan_entry = tk.Entry(planwrap, textvariable=self.plan_var, width=4,
+                                   justify="center", bg=BG, fg=TEXT,
+                                   insertbackground=TEXT, relief="flat",
+                                   font=("Consolas", 10))
+        self.plan_entry.pack(side="left", padx=4)
+        self.plan_entry.bind("<Return>", lambda e: self._save_plan())
+        self.plan_entry.bind("<FocusOut>", lambda e: self._save_plan(defocus=False))
+        # Labels and frames never take focus in Tk, so clicking "outside" the entry
+        # would otherwise leave the caret sitting in it forever.
+        r.bind_all("<Button-1>", self._click_defocus, add="+")
         self._lab(planwrap, "min", fg=MUTED, font=("Segoe UI", 9), bg=CARD).pack(side="left")
         self.fuel_plan = tk.Label(fuelcard, text="--", fg=TEXT, bg=CARD,
                                   font=("Consolas", 11, "bold"))
@@ -413,7 +419,11 @@ class App:
         self.root.update_idletasks()
         self.root.geometry("330x{0}".format(self.root.winfo_reqheight()))
 
-    def _save_plan(self):
+    def _click_defocus(self, event):
+        if event.widget is not self.plan_entry:
+            self.root.focus_set()
+
+    def _save_plan(self, defocus=True):
         try:
             v = int(self.plan_var.get())
         except Exception:
@@ -421,6 +431,11 @@ class App:
         v = min(600, max(1, v))
         self.plan_var.set(str(v))
         save_plan_minutes(v)
+        # repaint right away: without this, pressing Enter looks like it did nothing
+        # until the next telemetry frame arrives — and while parked none arrives
+        self._paint_fuel(self.last_fuel, self.last_session_ms)
+        if defocus:
+            self.root.focus_set()
 
     def _plan_minutes(self):
         try:
@@ -445,6 +460,8 @@ class App:
         self.cur_max = 0.0
         self.lap_had_pit = False
         self.lap_invalid = False
+        self.last_fuel = None
+        self.last_session_ms = None
         self.title_lab.config(text="ACC LOGGER" if game == ACC else "ASSETTO CORSA LOGGER")
         if game == ACC:
             self.neckwrap.pack_forget()
@@ -643,7 +660,9 @@ class App:
             t = p.tyreCoreTemperature[i]
             self.temp_cells[i].config(text="{0:.0f}".format(t), fg=temp_fg(t))
         stl = g.sessionTimeLeft
-        self._paint_fuel(p.fuel, stl if stl and stl > 0 else None)
+        self.last_fuel = p.fuel
+        self.last_session_ms = stl if stl and stl > 0 else None
+        self._paint_fuel(self.last_fuel, self.last_session_ms)
         self.filelbl.config(text="file: ...  rows: {0}".format(self.rows))
 
     def _set_status(self, text, color):

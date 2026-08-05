@@ -54,8 +54,12 @@ class TestColumns(unittest.TestCase):
 
     def test_acc_only_columns_absent_in_ac(self):
         ac = sim_shm.cols_for(AC)
-        for col in ("btemp_fl", "in_pitlane", "valid_lap", "fuel_x_lap", "fuel_est_laps"):
+        for col in ("btemp_fl", "valid_lap", "fuel_x_lap", "fuel_est_laps"):
             self.assertNotIn(col, ac)
+
+    def test_no_pitlane_column(self):
+        # it could only ever be 0: entering the pit lane finalizes the file
+        self.assertNotIn("in_pitlane", sim_shm.cols_for(ACC))
 
     def test_no_duplicate_columns(self):
         for game in (AC, ACC):
