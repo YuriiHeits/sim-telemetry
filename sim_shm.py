@@ -20,6 +20,11 @@ ACC = "ACC"
 
 STATUS_LIVE = 2
 
+# AC publishes no lap-validity flag, so a cut is derived from wheels off track.
+# Four is the standard AC/ACC rule; Real Penalty expresses the same thing as
+# "wheels out permitted" and defaults to allowing two.
+WHEELS_OUT_FOR_CUT = 4
+
 # ACC first: if both are somehow running they fight over the same mapping names,
 # so the choice must at least be deterministic. ACC is the less likely of the two
 # to be sitting idle in the background.
@@ -316,11 +321,17 @@ class SimReader:
             return g.isInPit == 1
         return g.isInPitLane == 1
 
-    def lap_valid_flag(self):
-        """ACC's own lap validity, or None in AC where no such field exists."""
+    def lap_invalid_now(self):
+        """True while the current lap is being spoiled — latch this over the lap.
+
+        ACC hands us its own verdict. AC has no validity field, so it is derived
+        from wheels off track, which is the same input Real Penalty's cutting
+        system uses (its "wheels out permitted" setting). Four wheels off is the
+        standard AC/ACC rule.
+        """
         if self.game == AC:
-            return None
-        return self.graph.isValidLap == 1
+            return self.phys.numberOfTyresOut >= WHEELS_OUT_FOR_CUT
+        return self.graph.isValidLap == 0
 
     def row(self, t):
         p, g = self.phys, self.graph

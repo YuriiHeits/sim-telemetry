@@ -22,7 +22,7 @@ import winreg
 import tkinter as tk
 
 import sim_shm
-from sim_shm import AC, ACC
+from sim_shm import ACC
 from fuel_model import FuelModel
 
 try:
@@ -544,7 +544,7 @@ class App:
 
         if in_pit:
             self.lap_had_pit = True
-        if r.lap_valid_flag() is False:
+        if r.lap_invalid_now():
             self.lap_invalid = True   # latched until the lap is recorded
 
         if in_pit and not self.prev_pit:
@@ -591,10 +591,9 @@ class App:
         if self.prev_completed < 0:
             self.prev_completed = c
         elif c > self.prev_completed:
-            valid = None if self.game == AC else (not self.lap_invalid)
+            valid = not self.lap_invalid
             self._add_lap(c, g.iLastTime, self.cur_max, valid)
-            self.fuel.lap_completed(p.fuel, g.iLastTime,
-                                    (valid is not False) and not self.lap_had_pit)
+            self.fuel.lap_completed(p.fuel, g.iLastTime, valid and not self.lap_had_pit)
             self.prev_completed = c
             self.cur_max = 0.0
             self.lap_had_pit = False
@@ -606,14 +605,14 @@ class App:
 
     def _refresh_laps(self):
         # an invalidated lap must not win "best", or a cut corner would show green
-        times = [t for _, t, _, v in self.lap_rows if 0 < t < 600000 and v is not False]
+        times = [t for _, t, _, v in self.lap_rows if 0 < t < 600000 and v]
         best = min(times) if times else None
         shown = self.lap_rows[-6:]
         for i, lab in enumerate(self.lap_labels):
             if i < len(shown):
                 ln, t, spd, valid = shown[i]
                 txt = "L{0:<3} {1:>9}  {2:3.0f} km/h".format(ln, fmt_ms(t), spd)
-                if valid is False:
+                if not valid:
                     fg = RED
                 elif best is not None and t == best:
                     fg = GREEN

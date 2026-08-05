@@ -114,6 +114,21 @@ class TestStructLayout(unittest.TestCase):
             for m in maps:
                 self.assertTrue(m.closed)
 
+    def test_ac_lap_validity_comes_from_wheels_off_track(self):
+        reader = sim_shm.SimReader(AC)
+        reader.phys = sim_shm.ACPhysics()
+        for n, invalid in ((0, False), (1, False), (2, False), (3, False), (4, True)):
+            reader.phys.numberOfTyresOut = n
+            self.assertEqual(reader.lap_invalid_now(), invalid, n)
+
+    def test_acc_lap_validity_comes_from_the_game(self):
+        reader = sim_shm.SimReader(ACC)
+        reader.graph = sim_shm.ACCGraphics()
+        reader.graph.isValidLap = 1
+        self.assertFalse(reader.lap_invalid_now())
+        reader.graph.isValidLap = 0
+        self.assertTrue(reader.lap_invalid_now())
+
     def test_row_length_matches_column_count(self):
         for game in (AC, ACC):
             reader = sim_shm.SimReader(game)
