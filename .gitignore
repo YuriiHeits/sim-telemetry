@@ -7,7 +7,8 @@ __pycache__/
 # Telemetry data — generated logs, large and ever-growing
 *.csv
 
-# Built binary — rebuild from gg_logger_gui.pyw via PyInstaller
+# Built binary — rebuild from stint_logger.pyw via PyInstaller (see README)
+StintLogger.exe
 GGLogger.exe
 
 # Per-user logger settings (fuel plan minutes)

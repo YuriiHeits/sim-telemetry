@@ -1,4 +1,4 @@
-"""Generate GGLogger.ico - a clean speedometer gauge icon."""
+"""Generate stint_logger.ico - a clean speedometer gauge icon."""
 from PIL import Image, ImageDraw
 import math
 import os
@@ -38,6 +38,6 @@ d.ellipse([cx - hr, cy - hr, cx + hr, cy + hr], fill=(235, 237, 240, 255))
 d.ellipse([cx - 20, cy - 20, cx + 20, cy + 20], fill=(63, 185, 80, 255))
 
 img = img.resize((256, 256), Image.LANCZOS)
-out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "GGLogger.ico")
+out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stint_logger.ico")
 img.save(out, sizes=[(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)])
 print("icon saved:", out)

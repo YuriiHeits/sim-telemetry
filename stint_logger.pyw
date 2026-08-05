@@ -1,4 +1,6 @@
-"""GG Telemetry Logger - GUI (Python 3.x + tkinter, stdlib only).
+"""StintLogger - telemetry logger for Assetto Corsa and ACC.
+
+GUI, Python 3 + tkinter, stdlib only (pystray/PIL optional, for the tray icon).
 
 Detects which sim is running (Assetto Corsa or ACC) and logs a CSV per stint to
 this folder, with the column set that matches the game — see sim_shm.py. The CSV
@@ -32,13 +34,40 @@ try:
 except Exception:
     HAS_TRAY = False
 
-APP_NAME = "Assetto Corsa Logger"      # window title: also the single-instance key
-APP_REG_NAME = "AssettoCorsaLogger"
+APP_NAME = "StintLogger"        # window title: also the single-instance key
+APP_REG_NAME = "StintLogger"   # HKCU Run entry name
 
-if getattr(sys, "frozen", False):
-    OUT_DIR = os.path.dirname(sys.executable)
-else:
-    OUT_DIR = os.path.dirname(os.path.abspath(__file__))
+def _writable(path):
+    probe = os.path.join(path, ".stintlogger_write_test")
+    try:
+        with open(probe, "w"):
+            pass
+        os.remove(probe)
+        return True
+    except Exception:
+        return False
+
+
+def _out_dir():
+    """Logs go next to the program, which is what a portable tool should do.
+
+    Except when that folder is read-only — dropping the exe into Program Files
+    is a normal thing for someone to try, and there the first makedirs would
+    raise on every poll. Fall back to Documents instead of failing.
+    """
+    home = os.path.dirname(sys.executable if getattr(sys, "frozen", False)
+                           else os.path.abspath(__file__))
+    if _writable(home):
+        return home
+    docs = os.path.join(os.path.expanduser("~"), "Documents", APP_NAME)
+    try:
+        os.makedirs(docs, exist_ok=True)
+    except Exception:
+        pass
+    return docs if _writable(docs) else home
+
+
+OUT_DIR = _out_dir()
 
 CFG_PATH = os.path.join(OUT_DIR, "logger.cfg")
 DEFAULT_PLAN_MIN = 30
@@ -711,7 +740,7 @@ class App:
         img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
         d = ImageDraw.Draw(img)
         d.rounded_rectangle([4, 4, 59, 59], radius=12, fill=(29, 33, 41, 255))
-        d.text((15, 22), "AC", fill=(74, 163, 255, 255))
+        d.text((13, 22), "SL", fill=(74, 163, 255, 255))
         return img
 
     def _setup_tray(self):
@@ -779,7 +808,7 @@ def single_instance_ok():
     global _MUTEX_HANDLE
     try:
         k = ctypes.windll.kernel32
-        _MUTEX_HANDLE = k.CreateMutexW(None, False, "AssettoCorsaLogger_singleton")
+        _MUTEX_HANDLE = k.CreateMutexW(None, False, "StintLogger_singleton")
         return k.GetLastError() != 183  # 183 = ERROR_ALREADY_EXISTS
     except Exception:
         return True  # never block startup if the check itself fails

@@ -14,7 +14,7 @@ F = lambda r, k: float(r[k])
 
 print("FILE:", os.path.basename(path))
 if not rows or "heading" not in rows[0]:
-    print("  ⚠ немає колонок heading/vel — лог зі старого логгера. Перезапиши новим GGLogger.exe.")
+    print("  ⚠ немає колонок heading/vel — лог зі старого логгера. Перезапиши новим StintLogger.")
     sys.exit()
 
 

@@ -16,7 +16,7 @@ sys.argv = [sys.argv[0]]  # keep --tray out of it
 import importlib.util
 
 spec = importlib.util.spec_from_file_location(
-    "gg_logger_gui", os.path.join(ROOT, "gg_logger_gui.pyw"))
+    "stint_logger", os.path.join(ROOT, "stint_logger.pyw"))
 gui = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gui)
 
