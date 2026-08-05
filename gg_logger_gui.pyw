@@ -355,12 +355,19 @@ class App:
         self._lab(r, "LAPS  (time · max km/h)", fg=MUTED, font=("Segoe UI", 9)).pack(pady=(12, 2))
         lapcard = tk.Frame(r, bg=CARD)
         lapcard.pack(fill="x", padx=16)
-        self.lap_labels = []
-        for _ in range(6):
-            lab = tk.Label(lapcard, text="", fg=TEXT, bg=CARD, font=("Consolas", 11),
-                           anchor="w", padx=8, pady=1)
-            lab.pack(fill="x")
-            self.lap_labels.append(lab)
+        # Listbox rather than a row of labels: it scrolls, and unlike a Canvas it
+        # still gives per-row colour, which the red/green lap marking needs.
+        self.lap_scroll = tk.Scrollbar(lapcard, orient="vertical", width=10,
+                                       relief="flat", borderwidth=0,
+                                       troughcolor=CARD, bg=GREY, activebackground=MUTED)
+        self.lap_list = tk.Listbox(lapcard, height=6, bg=CARD, fg=TEXT,
+                                   font=("Consolas", 11), activestyle="none",
+                                   highlightthickness=0, borderwidth=0,
+                                   selectbackground=CARD, selectforeground=TEXT,
+                                   yscrollcommand=self.lap_scroll.set)
+        self.lap_scroll.config(command=self.lap_list.yview)
+        self.lap_list.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=2)
+        self.lap_scroll.pack(side="right", fill="y")
         self._refresh_laps()
 
         self._lab(r, "FUEL PLAN", fg=MUTED, font=("Segoe UI", 9)).pack(pady=(12, 2))
@@ -607,22 +614,26 @@ class App:
         # an invalidated lap must not win "best", or a cut corner would show green
         times = [t for _, t, _, v in self.lap_rows if 0 < t < 600000 and v]
         best = min(times) if times else None
-        shown = self.lap_rows[-6:]
-        for i, lab in enumerate(self.lap_labels):
-            if i < len(shown):
-                ln, t, spd, valid = shown[i]
-                txt = "L{0:<3} {1:>9}  {2:3.0f} km/h".format(ln, fmt_ms(t), spd)
-                if not valid:
-                    fg = RED
-                elif best is not None and t == best:
-                    fg = GREEN
-                else:
-                    fg = TEXT
-                lab.config(text=txt, fg=fg)
-            elif i == 0 and not shown:
-                lab.config(text="(no completed laps yet)", fg=MUTED)
+        # follow the newest lap only when already at the bottom, so scrolling back
+        # through a long stint is not yanked away every time a lap completes
+        at_bottom = self.lap_list.yview()[1] >= 0.999
+        self.lap_list.delete(0, "end")
+        if not self.lap_rows:
+            self.lap_list.insert("end", "(no completed laps yet)")
+            self.lap_list.itemconfig(0, foreground=MUTED)
+            return
+        for i, (ln, t, spd, valid) in enumerate(self.lap_rows):
+            self.lap_list.insert("end", "L{0:<3} {1:>9}  {2:3.0f} km/h".format(
+                ln, fmt_ms(t), spd))
+            if not valid:
+                fg = RED
+            elif best is not None and t == best:
+                fg = GREEN
             else:
-                lab.config(text="")
+                fg = TEXT
+            self.lap_list.itemconfig(i, foreground=fg)
+        if at_bottom:
+            self.lap_list.see("end")
 
     def _paint_fuel(self, fuel_l=None, session_ms=None):
         lpl = self.fuel.l_per_lap()

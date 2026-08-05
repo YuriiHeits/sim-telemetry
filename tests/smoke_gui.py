@@ -44,9 +44,26 @@ app.lap_rows = [(1, 100000, 210.0, True), (2, 99000, 212.0, True),
                 (3, 95000, 215.0, False), (4, 99500, 211.0, True)]
 app._refresh_laps()
 root.update_idletasks()
-colors = {"#3fb950": "GREEN", "#f0584b": "RED", "#e6e8eb": "TEXT"}
-for lab in app.lap_labels[:4]:
-    print("lap row:", lab.cget("text"), "->", colors.get(lab.cget("fg"), lab.cget("fg")))
+colors = {"#3fb950": "GREEN", "#f0584b": "RED", "#e6e8eb": "TEXT", "#8a909a": "MUTED"}
+for i in range(app.lap_list.size()):
+    fg = app.lap_list.itemcget(i, "foreground")
+    print("lap row:", app.lap_list.get(i), "->", colors.get(fg, fg))
+
+# scrolling: a long stint must stay reachable and follow the newest lap
+app.lap_rows = [(n, 99000 + n * 10, 210.0, True) for n in range(1, 26)]
+app._refresh_laps()
+root.update_idletasks()
+first, last = app.lap_list.yview()
+print("25 laps -> rows in listbox:", app.lap_list.size(),
+      "| visible fraction: {0:.2f}..{1:.2f}".format(first, last),
+      "| scrollable:", last - first < 0.999)
+app.lap_list.yview_moveto(0.0)          # user scrolls up to look at early laps
+root.update_idletasks()
+app.lap_rows.append((26, 98000, 211.0, True))
+app._refresh_laps()
+root.update_idletasks()
+print("after a new lap while scrolled up, top fraction stays:",
+      "{0:.2f}".format(app.lap_list.yview()[0]))
 
 # fuel: two crossings 3.0 L apart, 100 s laps
 app.fuel.lap_completed(60.0, 100000, True)
