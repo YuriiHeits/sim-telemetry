@@ -1,20 +1,29 @@
 """GG Telemetry Logger - GUI (Python 3.x + tkinter, stdlib only).
-Works for Assetto Corsa AND ACC (reads shared memory via ctypes/mmap).
-Auto-detects a live session, logs a CSV per stint to this folder.
-The CSV is FINALIZED (closed) on pit-entry or when you leave the track,
-so it can be read without quitting the sim. Double-click to run."""
+
+Detects which sim is running (Assetto Corsa or ACC) and logs a CSV per stint to
+this folder, with the column set that matches the game — see sim_shm.py. The CSV
+is FINALIZED (closed) on pit entry or when you leave the track, so it can be read
+without quitting the sim. Double-click to run.
+
+NeckFX is a Custom Shaders Patch feature and therefore exists in AC only; its
+block is hidden while ACC is running. Everything else is the same in both games.
+"""
 
 import os
 import sys
 import re
+import json
 import time
 import csv
 import ctypes
-import mmap
 import shutil
 import threading
 import winreg
 import tkinter as tk
+
+import sim_shm
+from sim_shm import AC, ACC
+from fuel_model import FuelModel
 
 try:
     import pystray
@@ -23,14 +32,16 @@ try:
 except Exception:
     HAS_TRAY = False
 
-APP_NAME = "Assetto Corsa Logger"
+APP_NAME = "Assetto Corsa Logger"      # window title: also the single-instance key
 APP_REG_NAME = "AssettoCorsaLogger"
 
 if getattr(sys, "frozen", False):
     OUT_DIR = os.path.dirname(sys.executable)
 else:
     OUT_DIR = os.path.dirname(os.path.abspath(__file__))
-AC_LIVE = 2
+
+CFG_PATH = os.path.join(OUT_DIR, "logger.cfg")
+DEFAULT_PLAN_MIN = 30
 
 # ---- colors ----
 BG = "#14161b"
@@ -42,70 +53,6 @@ AMBER = "#d29922"
 BLUE = "#4aa3ff"
 RED = "#f0584b"
 GREY = "#6e7681"
-
-
-class Physics(ctypes.Structure):
-    _pack_ = 4
-    _fields_ = [
-        ("packetId", ctypes.c_int32), ("gas", ctypes.c_float), ("brake", ctypes.c_float),
-        ("fuel", ctypes.c_float), ("gear", ctypes.c_int32), ("rpms", ctypes.c_int32),
-        ("steerAngle", ctypes.c_float), ("speedKmh", ctypes.c_float),
-        ("velocity", ctypes.c_float * 3), ("accG", ctypes.c_float * 3),
-        ("wheelSlip", ctypes.c_float * 4), ("wheelLoad", ctypes.c_float * 4),
-        ("wheelsPressure", ctypes.c_float * 4), ("wheelAngularSpeed", ctypes.c_float * 4),
-        ("tyreWear", ctypes.c_float * 4), ("tyreDirtyLevel", ctypes.c_float * 4),
-        ("tyreCoreTemperature", ctypes.c_float * 4), ("camberRAD", ctypes.c_float * 4),
-        ("suspensionTravel", ctypes.c_float * 4), ("drs", ctypes.c_float), ("tc", ctypes.c_float),
-        ("heading", ctypes.c_float), ("pitch", ctypes.c_float), ("roll", ctypes.c_float),
-        ("cgHeight", ctypes.c_float), ("carDamage", ctypes.c_float * 5),
-        ("numberOfTyresOut", ctypes.c_int32), ("pitLimiterOn", ctypes.c_int32), ("abs", ctypes.c_float),
-    ]
-
-
-class Graphics(ctypes.Structure):
-    _pack_ = 4
-    _fields_ = [
-        ("packetId", ctypes.c_int32), ("status", ctypes.c_int32), ("session", ctypes.c_int32),
-        ("currentTime", ctypes.c_wchar * 15), ("lastTime", ctypes.c_wchar * 15),
-        ("bestTime", ctypes.c_wchar * 15), ("split", ctypes.c_wchar * 15),
-        ("completedLaps", ctypes.c_int32), ("position", ctypes.c_int32),
-        ("iCurrentTime", ctypes.c_int32), ("iLastTime", ctypes.c_int32), ("iBestTime", ctypes.c_int32),
-        ("sessionTimeLeft", ctypes.c_float), ("distanceTraveled", ctypes.c_float),
-        ("isInPit", ctypes.c_int32), ("currentSectorIndex", ctypes.c_int32),
-        ("lastSectorTime", ctypes.c_int32), ("numberOfLaps", ctypes.c_int32),
-        ("tyreCompound", ctypes.c_wchar * 33), ("replayTimeMultiplier", ctypes.c_float),
-        ("normalizedCarPosition", ctypes.c_float), ("carCoordinates", ctypes.c_float * 3),
-    ]
-
-
-class Static(ctypes.Structure):
-    _pack_ = 4
-    _fields_ = [
-        ("smVersion", ctypes.c_wchar * 15), ("acVersion", ctypes.c_wchar * 15),
-        ("numberOfSessions", ctypes.c_int32), ("numCars", ctypes.c_int32),
-        ("carModel", ctypes.c_wchar * 33), ("track", ctypes.c_wchar * 33),
-        ("playerName", ctypes.c_wchar * 33), ("playerSurname", ctypes.c_wchar * 33),
-        ("playerNick", ctypes.c_wchar * 33), ("sectorCount", ctypes.c_int32),
-    ]
-
-
-COLS = ["t", "lap", "pos", "speed_kmh", "rpm", "gear", "gas", "brake", "steer",
-        "gx", "gy", "gz", "slip_fl", "slip_fr", "slip_rl", "slip_rr",
-        "press_fl", "press_fr", "press_rl", "press_rr",
-        "ttemp_fl", "ttemp_fr", "ttemp_rl", "ttemp_rr",
-        "camber_fl", "camber_fr", "camber_rl", "camber_rr",
-        "susp_fl", "susp_fr", "susp_rl", "susp_rr",
-        "tc", "abs", "fuel", "inpit", "last_ms", "best_ms", "session", "race_pos",
-        "heading", "vel_x", "vel_y", "vel_z",
-        "tyres_out", "dirt_fl", "dirt_fr", "dirt_rl", "dirt_rr"]
-
-# AC/ACC session type enum
-SESSION_NAMES = {-1: "UNKNOWN", 0: "PRACTICE", 1: "QUALI", 2: "RACE", 3: "HOTLAP",
-                 4: "TIMEATK", 5: "DRIFT", 6: "DRAG", 7: "HOTSTINT", 8: "SUPERPOLE"}
-
-
-def sess_name(v):
-    return SESSION_NAMES.get(v, "S{0}".format(v))
 
 
 def safe(s):
@@ -129,6 +76,30 @@ def temp_fg(v):
     if 75 <= v <= 95:
         return GREEN
     return BLUE if v < 75 else RED
+
+
+def fmt_ms(ms):
+    if not (0 < ms < 600000):
+        return "--:--.---"
+    s = ms / 1000.0
+    return "{0:d}:{1:06.3f}".format(int(s) // 60, s - (int(s) // 60) * 60)
+
+
+def load_plan_minutes():
+    try:
+        with open(CFG_PATH, "r", encoding="utf-8") as fh:
+            v = int(json.load(fh).get("plan_minutes", DEFAULT_PLAN_MIN))
+        return v if 1 <= v <= 600 else DEFAULT_PLAN_MIN
+    except Exception:
+        return DEFAULT_PLAN_MIN
+
+
+def save_plan_minutes(v):
+    try:
+        with open(CFG_PATH, "w", encoding="utf-8") as fh:
+            json.dump({"plan_minutes": v}, fh)
+    except Exception:
+        pass
 
 
 # ---- NeckFX preset switching (edits assettocorsa/extension/config/neck.ini) ----
@@ -287,8 +258,8 @@ def set_autostart(on):
 class App:
     def __init__(self, root):
         self.root = root
-        self.maps = []
-        self.phys = self.graph = self.stat = None
+        self.game = None            # None until a sim process shows up
+        self.reader = None
         self.f = None
         self.w = None
         self.rows = 0
@@ -298,22 +269,26 @@ class App:
         self.prev_pit = True
         self.last_saved = "-"
         self.reattach_t = 0.0
-        self.lap_rows = []          # [(lap_no, time_ms, max_kmh), ...] for current stint
+        self.game_check_t = 0.0
+        self.session_key = None
+        self.lap_rows = []          # [(lap_no, time_ms, max_kmh, valid), ...]
         self.prev_completed = -1
         self.cur_max = 0.0
+        self.lap_had_pit = False
+        self.lap_invalid = False    # latched: set the moment the game says invalid
+        self.fuel = FuelModel()
         self.neck_mode = read_neck_mode(NECK_INI)
         self.tray = None
         self._build()
         self._setup_tray()
         if HAS_TRAY and "--tray" in sys.argv:
             self.root.withdraw()
-        self._attach()
+        self._apply_game(sim_shm.detect_game())
         self.poll()
 
     # ---------- UI ----------
     def _lab(self, parent, text, fg=TEXT, font=("Segoe UI", 10), bg=BG):
-        l = tk.Label(parent, text=text, fg=fg, bg=bg, font=font)
-        return l
+        return tk.Label(parent, text=text, fg=fg, bg=bg, font=font)
 
     def _tyre_grid(self, parent, title):
         wrap = tk.Frame(parent, bg=BG)
@@ -331,14 +306,22 @@ class App:
         grid.columnconfigure(1, weight=1)
         return wrap, cells
 
+    def _fuel_row(self, parent, r, name):
+        self._lab(parent, name, fg=MUTED, font=("Segoe UI", 9), bg=CARD).grid(
+            row=r, column=0, sticky="w", padx=8, pady=1)
+        val = tk.Label(parent, text="--", fg=TEXT, bg=CARD, font=("Consolas", 11, "bold"))
+        val.grid(row=r, column=1, sticky="e", padx=8, pady=1)
+        return val
+
     def _build(self):
         r = self.root
         r.title(APP_NAME)
         r.configure(bg=BG)
-        r.geometry("330x660")
         r.resizable(False, False)
 
-        self._lab(r, "ASSETTO CORSA LOGGER", fg=TEXT, font=("Segoe UI Semibold", 13)).pack(pady=(12, 2))
+        self.title_lab = self._lab(r, "ASSETTO CORSA LOGGER", fg=TEXT,
+                                   font=("Segoe UI Semibold", 13))
+        self.title_lab.pack(pady=(12, 2))
         self.status = self._lab(r, "○  WAITING FOR SIM", fg=GREY, font=("Segoe UI", 14, "bold"))
         self.status.pack(pady=(0, 6))
         self.carlbl = self._lab(r, "—", fg=MUTED, font=("Segoe UI", 10))
@@ -349,7 +332,7 @@ class App:
         mid = tk.Frame(r, bg=BG)
         mid.pack(fill="x", padx=16, pady=10)
         self.metrics = {}
-        for i, (key, name) in enumerate([("speed", "SPEED"), ("lap", "LAP"), ("fuel", "FUEL L")]):
+        for i, (key, name) in enumerate([("lap", "LAP"), ("fuel", "FUEL L"), ("llap", "L / LAP")]):
             col = tk.Frame(mid, bg=BG)
             col.grid(row=0, column=i, sticky="nsew")
             mid.columnconfigure(i, weight=1)
@@ -378,74 +361,126 @@ class App:
             self.lap_labels.append(lab)
         self._refresh_laps()
 
+        self._lab(r, "FUEL PLAN", fg=MUTED, font=("Segoe UI", 9)).pack(pady=(12, 2))
+        fuelcard = tk.Frame(r, bg=CARD)
+        fuelcard.pack(fill="x", padx=16)
+        fuelcard.columnconfigure(1, weight=1)
+        self.fuel_left = self._fuel_row(fuelcard, 0, "LAPS LEFT")
+        self.fuel_end = self._fuel_row(fuelcard, 1, "TO SESSION END")
+        planwrap = tk.Frame(fuelcard, bg=CARD)
+        planwrap.grid(row=2, column=0, sticky="w", padx=8, pady=1)
+        self._lab(planwrap, "PLAN", fg=MUTED, font=("Segoe UI", 9), bg=CARD).pack(side="left")
+        self.plan_var = tk.StringVar(value=str(load_plan_minutes()))
+        ent = tk.Entry(planwrap, textvariable=self.plan_var, width=4, justify="center",
+                       bg=BG, fg=TEXT, insertbackground=TEXT, relief="flat",
+                       font=("Consolas", 10))
+        ent.pack(side="left", padx=4)
+        ent.bind("<Return>", lambda e: self._save_plan())
+        ent.bind("<FocusOut>", lambda e: self._save_plan())
+        self._lab(planwrap, "min", fg=MUTED, font=("Segoe UI", 9), bg=CARD).pack(side="left")
+        self.fuel_plan = tk.Label(fuelcard, text="--", fg=TEXT, bg=CARD,
+                                  font=("Consolas", 11, "bold"))
+        self.fuel_plan.grid(row=2, column=1, sticky="e", padx=8, pady=1)
+
         self.filelbl = self._lab(r, "file: -", fg=MUTED, font=("Consolas", 9))
         self.filelbl.pack(pady=(12, 0))
         self.savedlbl = self._lab(r, "saved: -", fg=MUTED, font=("Consolas", 9))
         self.savedlbl.pack()
 
-        neck = tk.Frame(r, bg=BG)
-        neck.pack(pady=(12, 0))
-        self.neck_btn = tk.Button(neck, text="NeckFX: OFF", command=self.cycle_neck,
+        self.btns = tk.Frame(r, bg=BG)
+        self.neckwrap = tk.Frame(r, bg=BG)
+        self.neck_btn = tk.Button(self.neckwrap, text="NeckFX: OFF", command=self.cycle_neck,
                                   bg=CARD, fg=GREY, relief="flat", padx=12, pady=4, width=16,
                                   activebackground="#2a2f38", activeforeground=TEXT)
         self.neck_btn.pack()
-        self.neckhint = self._lab(r, "", fg=MUTED, font=("Segoe UI", 8))
+        self.neckhint = self._lab(self.neckwrap, "", fg=MUTED, font=("Segoe UI", 8))
         self.neckhint.pack()
+        self.neckwrap.pack(pady=(12, 0))
 
-        btns = tk.Frame(r, bg=BG)
-        btns.pack(pady=12)
-        tk.Button(btns, text="Open folder", command=lambda: os.startfile(OUT_DIR),
+        self.btns.pack(pady=12)
+        tk.Button(self.btns, text="Open folder", command=lambda: os.startfile(OUT_DIR),
                   bg=CARD, fg=TEXT, relief="flat", padx=10, pady=4,
                   activebackground="#2a2f38", activeforeground=TEXT).pack(side="left", padx=4)
-        tk.Button(btns, text="Quit", command=self.quit,
+        tk.Button(self.btns, text="Quit", command=self.quit,
                   bg=CARD, fg=TEXT, relief="flat", padx=10, pady=4,
                   activebackground="#2a2f38", activeforeground=TEXT).pack(side="left", padx=4)
         self._paint_neck()
         r.protocol("WM_DELETE_WINDOW", self.on_close)
 
-    # ---------- shared memory ----------
-    def _attach(self):
-        for m in self.maps:
+    def _fit(self):
+        """Height follows the layout instead of a hardcoded number, so hiding the
+        NeckFX block cannot clip the window or leave a gap."""
+        self.root.update_idletasks()
+        self.root.geometry("330x{0}".format(self.root.winfo_reqheight()))
+
+    def _save_plan(self):
+        try:
+            v = int(self.plan_var.get())
+        except Exception:
+            v = DEFAULT_PLAN_MIN
+        v = min(600, max(1, v))
+        self.plan_var.set(str(v))
+        save_plan_minutes(v)
+
+    def _plan_minutes(self):
+        try:
+            return min(600, max(1, int(self.plan_var.get())))
+        except Exception:
+            return DEFAULT_PLAN_MIN
+
+    # ---------- game switching ----------
+    def _apply_game(self, game):
+        """Called on startup and whenever the running sim changes."""
+        self._close()
+        if self.reader is not None:
+            self.reader.close()
+        self.game = game
+        self.reader = sim_shm.SimReader(game) if game else None
+        if self.reader is not None:
+            self.reader.attach()
+        self.fuel.reset()
+        self.session_key = None
+        self.lap_rows = []
+        self.prev_completed = -1
+        self.cur_max = 0.0
+        self.lap_had_pit = False
+        self.lap_invalid = False
+        self.title_lab.config(text="ACC LOGGER" if game == ACC else "ASSETTO CORSA LOGGER")
+        if game == ACC:
+            self.neckwrap.pack_forget()
+        else:
+            self.neckwrap.pack(pady=(12, 0), before=self.btns)
+        self._refresh_laps()
+        self._paint_fuel()
+        self._fit()
+        if self.tray is not None:
             try:
-                m.close()
+                self.tray.update_menu()
             except Exception:
                 pass
-        self.maps = []
-        try:
-            mp = mmap.mmap(-1, ctypes.sizeof(Physics), tagname="acpmf_physics")
-            mg = mmap.mmap(-1, ctypes.sizeof(Graphics), tagname="acpmf_graphics")
-            ms = mmap.mmap(-1, ctypes.sizeof(Static), tagname="acpmf_static")
-            self.maps = [mp, mg, ms]
-            self.phys = Physics.from_buffer(mp)
-            self.graph = Graphics.from_buffer(mg)
-            self.stat = Static.from_buffer(ms)
-        except Exception:
-            self.phys = self.graph = self.stat = None
-
-    def _valid(self):
-        try:
-            return bool(self.stat and (self.stat.carModel or "").strip())
-        except Exception:
-            return False
 
     # ---------- file ----------
     def _open(self):
-        car = safe((self.stat.carModel or "").strip())
-        trk = safe((self.stat.track or "").strip())
+        s, g = self.reader.stat, self.reader.graph
+        car = safe((s.carModel or "").strip())
+        trk = safe((s.track or "").strip())
         day = time.strftime("%Y-%m-%d")
         folder = os.path.join(OUT_DIR, trk, car, day)
         if not os.path.isdir(folder):
             os.makedirs(folder)
-        tag = sess_name(self.graph.session)
-        path = os.path.join(folder, time.strftime("%H-%M-%S") + "_" + tag + ".csv")
+        tag = sim_shm.sess_name(g.session)
+        path = os.path.join(folder, "{0}_{1}_{2}.csv".format(
+            time.strftime("%H-%M-%S"), self.game, tag))
         self.f = open(path, "w", newline="")
         self.w = csv.writer(self.f)
-        self.w.writerow(COLS)
+        self.w.writerow(self.reader.cols)
         self.rows = 0
         self.t0 = time.perf_counter()
         self.lap_rows = []
         self.prev_completed = -1
         self.cur_max = 0.0
+        self.lap_had_pit = False
+        self.lap_invalid = False
         self._refresh_laps()
         self.filelbl.config(text="file: " + os.path.basename(path))
 
@@ -464,9 +499,16 @@ class App:
     # ---------- loop ----------
     def poll(self):
         now = time.perf_counter()
-        if not self._valid():
-            if now - self.reattach_t > 1.0:
-                self._attach()
+        if now - self.game_check_t > 1.0:
+            self.game_check_t = now
+            found = sim_shm.detect_game()
+            if found != self.game:
+                self._apply_game(found)
+
+        r = self.reader
+        if r is None or not r.valid():
+            if r is not None and now - self.reattach_t > 1.0:
+                r.attach()
                 self.reattach_t = now
             self._set_status("○  WAITING FOR SIM", GREY)
             self.carlbl.config(text="start AC / ACC and get on track")
@@ -475,16 +517,24 @@ class App:
             self.root.after(200, self.poll)
             return
 
-        p, g, s = self.phys, self.graph, self.stat
-        in_pit = (g.isInPit == 1)
-        live = (g.status == AC_LIVE)
-        self.carlbl.config(text="{0}  @  {1}".format((s.carModel or "").strip(), (s.track or "").strip()))
+        p, g, s = r.phys, r.graph, r.stat
+        key = ((s.carModel or "").strip(), (s.track or "").strip())
+        if key != self.session_key:
+            self.session_key = key
+            self.fuel.reset()      # new car or track: fuel history means nothing
+        in_pit = r.in_pit_for_finalize()
+        self.carlbl.config(text="{0}  @  {1}".format(key[0], key[1]))
+
+        if in_pit:
+            self.lap_had_pit = True
+        if r.lap_valid_flag() is False:
+            self.lap_invalid = True   # latched until the lap is recorded
 
         if in_pit and not self.prev_pit:
             self._close()
         self.prev_pit = in_pit
 
-        if live and not in_pit:
+        if r.live() and not in_pit:
             moving = p.speedKmh >= 5.0
             if moving:
                 self.stopped = 0.0
@@ -512,71 +562,79 @@ class App:
         self.root.after(20, self.poll)
 
     def _write(self, p, g):
-        self.w.writerow([
-            "{0:.3f}".format(time.perf_counter() - self.t0), g.completedLaps, "{0:.5f}".format(g.normalizedCarPosition),
-            "{0:.2f}".format(p.speedKmh), p.rpms, p.gear,
-            "{0:.3f}".format(p.gas), "{0:.3f}".format(p.brake), "{0:.4f}".format(p.steerAngle),
-            "{0:.3f}".format(p.accG[0]), "{0:.3f}".format(p.accG[1]), "{0:.3f}".format(p.accG[2]),
-            "{0:.3f}".format(p.wheelSlip[0]), "{0:.3f}".format(p.wheelSlip[1]), "{0:.3f}".format(p.wheelSlip[2]), "{0:.3f}".format(p.wheelSlip[3]),
-            "{0:.2f}".format(p.wheelsPressure[0]), "{0:.2f}".format(p.wheelsPressure[1]), "{0:.2f}".format(p.wheelsPressure[2]), "{0:.2f}".format(p.wheelsPressure[3]),
-            "{0:.1f}".format(p.tyreCoreTemperature[0]), "{0:.1f}".format(p.tyreCoreTemperature[1]), "{0:.1f}".format(p.tyreCoreTemperature[2]), "{0:.1f}".format(p.tyreCoreTemperature[3]),
-            "{0:.4f}".format(p.camberRAD[0]), "{0:.4f}".format(p.camberRAD[1]), "{0:.4f}".format(p.camberRAD[2]), "{0:.4f}".format(p.camberRAD[3]),
-            "{0:.4f}".format(p.suspensionTravel[0]), "{0:.4f}".format(p.suspensionTravel[1]), "{0:.4f}".format(p.suspensionTravel[2]), "{0:.4f}".format(p.suspensionTravel[3]),
-            "{0:.2f}".format(p.tc), "{0:.2f}".format(p.abs), "{0:.2f}".format(p.fuel), g.isInPit,
-            g.iLastTime, g.iBestTime, sess_name(g.session), g.position,
-            "{0:.5f}".format(p.heading), "{0:.4f}".format(p.velocity[0]),
-            "{0:.4f}".format(p.velocity[1]), "{0:.4f}".format(p.velocity[2]),
-            p.numberOfTyresOut,
-            "{0:.3f}".format(p.tyreDirtyLevel[0]), "{0:.3f}".format(p.tyreDirtyLevel[1]),
-            "{0:.3f}".format(p.tyreDirtyLevel[2]), "{0:.3f}".format(p.tyreDirtyLevel[3]),
-        ])
+        self.w.writerow(self.reader.row(time.perf_counter() - self.t0))
         self.rows += 1
         if self.rows % 50 == 0:
             self.f.flush()
 
-        # --- per-lap time + peak speed ---
+        # --- per-lap time, peak speed, validity, fuel ---
         if p.speedKmh > self.cur_max:
             self.cur_max = p.speedKmh
         c = g.completedLaps
         if self.prev_completed < 0:
             self.prev_completed = c
         elif c > self.prev_completed:
-            self._add_lap(c, g.iLastTime, self.cur_max)  # the lap just crossed
+            valid = None if self.game == AC else (not self.lap_invalid)
+            self._add_lap(c, g.iLastTime, self.cur_max, valid)
+            self.fuel.lap_completed(p.fuel, g.iLastTime,
+                                    (valid is not False) and not self.lap_had_pit)
             self.prev_completed = c
             self.cur_max = 0.0
+            self.lap_had_pit = False
+            self.lap_invalid = False
 
-    @staticmethod
-    def _fmt_ms(ms):
-        if not (0 < ms < 600000):
-            return "--:--.---"
-        s = ms / 1000.0
-        return "{0:d}:{1:06.3f}".format(int(s) // 60, s - (int(s) // 60) * 60)
-
-    def _add_lap(self, lap_no, time_ms, max_kmh):
-        self.lap_rows.append((lap_no, time_ms, max_kmh))
+    def _add_lap(self, lap_no, time_ms, max_kmh, valid):
+        self.lap_rows.append((lap_no, time_ms, max_kmh, valid))
         self._refresh_laps()
 
     def _refresh_laps(self):
-        valid = [t for _, t, _ in self.lap_rows if 0 < t < 600000]
-        best = min(valid) if valid else None
+        # an invalidated lap must not win "best", or a cut corner would show green
+        times = [t for _, t, _, v in self.lap_rows if 0 < t < 600000 and v is not False]
+        best = min(times) if times else None
         shown = self.lap_rows[-6:]
         for i, lab in enumerate(self.lap_labels):
             if i < len(shown):
-                ln, t, spd = shown[i]
-                txt = "L{0:<3} {1:>9}  {2:3.0f} km/h".format(ln, self._fmt_ms(t), spd)
-                fg = GREEN if (best is not None and t == best) else TEXT
+                ln, t, spd, valid = shown[i]
+                txt = "L{0:<3} {1:>9}  {2:3.0f} km/h".format(ln, fmt_ms(t), spd)
+                if valid is False:
+                    fg = RED
+                elif best is not None and t == best:
+                    fg = GREEN
+                else:
+                    fg = TEXT
                 lab.config(text=txt, fg=fg)
             elif i == 0 and not shown:
                 lab.config(text="(no completed laps yet)", fg=MUTED)
             else:
                 lab.config(text="")
 
+    def _paint_fuel(self, fuel_l=None, session_ms=None):
+        lpl = self.fuel.l_per_lap()
+        self.metrics["llap"].config(text="--" if lpl is None else "{0:.2f}".format(lpl))
+
+        left = None if fuel_l is None else self.fuel.laps_left(fuel_l)
+        self.fuel_left.config(text="--" if left is None else "{0:.1f}".format(left),
+                              fg=TEXT if left is None else (RED if left < 2 else TEXT))
+
+        for lab, ms in ((self.fuel_end, session_ms),
+                        (self.fuel_plan, self._plan_minutes() * 60000)):
+            need = self.fuel.fuel_for_ms(ms)
+            if need is None:
+                lab.config(text="--", fg=TEXT)
+                continue
+            if fuel_l is None:
+                lab.config(text="{0:.1f} L".format(need), fg=TEXT)
+                continue
+            delta = need - fuel_l
+            lab.config(text="{0:.1f} L  ({1:+.1f})".format(need, delta),
+                       fg=RED if delta > 0 else GREEN)
+
     def _update_live(self, p, g):
         if g.session in (1, 2) and g.position > 0:   # quali / race -> show place
-            self.sesslbl.config(text="{0}  ·  P{1}".format(sess_name(g.session), g.position), fg=AMBER)
+            self.sesslbl.config(text="{0}  ·  P{1}".format(sim_shm.sess_name(g.session),
+                                                           g.position), fg=AMBER)
         else:
-            self.sesslbl.config(text=sess_name(g.session), fg=MUTED)
-        self.metrics["speed"].config(text="{0:.0f}".format(p.speedKmh))
+            self.sesslbl.config(text=sim_shm.sess_name(g.session), fg=MUTED)
         self.metrics["lap"].config(text=str(g.completedLaps))
         self.metrics["fuel"].config(text="{0:.1f}".format(p.fuel))
         for i in range(4):
@@ -584,6 +642,8 @@ class App:
             self.press_cells[i].config(text="{0:.1f}".format(v), fg=press_fg(v))
             t = p.tyreCoreTemperature[i]
             self.temp_cells[i].config(text="{0:.0f}".format(t), fg=temp_fg(t))
+        stl = g.sessionTimeLeft
+        self._paint_fuel(p.fuel, stl if stl and stl > 0 else None)
         self.filelbl.config(text="file: ...  rows: {0}".format(self.rows))
 
     def _set_status(self, text, color):
@@ -638,7 +698,10 @@ class App:
         )
         menu = pystray.Menu(
             pystray.MenuItem("Show", lambda i, it: self._tray_show(), default=True),
-            pystray.MenuItem(lambda it: "NeckFX: " + self.neck_mode, neck_menu),
+            # NeckFX is CSP, i.e. AC only. Editing neck.ini before AC starts is
+            # useful, so this stays enabled unless ACC is the running sim.
+            pystray.MenuItem(lambda it: "NeckFX: " + self.neck_mode, neck_menu,
+                             enabled=lambda it: self.game != ACC),
             pystray.MenuItem("Run at startup", lambda i, it: self._tray_autostart(),
                              checked=lambda it: is_autostart()),
             pystray.Menu.SEPARATOR,
@@ -669,6 +732,8 @@ class App:
 
     def quit(self):
         self._close()
+        if self.reader is not None:
+            self.reader.close()
         if self.tray is not None:
             try:
                 self.tray.stop()

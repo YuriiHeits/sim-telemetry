@@ -9,3 +9,6 @@ __pycache__/
 
 # Built binary — rebuild from gg_logger_gui.pyw via PyInstaller
 GGLogger.exe
+
+# Per-user logger settings (fuel plan minutes)
+logger.cfg
