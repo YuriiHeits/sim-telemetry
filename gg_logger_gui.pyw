@@ -6,11 +6,25 @@ so it can be read without quitting the sim. Double-click to run."""
 
 import os
 import sys
+import re
 import time
 import csv
 import ctypes
 import mmap
+import shutil
+import threading
+import winreg
 import tkinter as tk
+
+try:
+    import pystray
+    from PIL import Image, ImageDraw
+    HAS_TRAY = True
+except Exception:
+    HAS_TRAY = False
+
+APP_NAME = "Assetto Corsa Logger"
+APP_REG_NAME = "AssettoCorsaLogger"
 
 if getattr(sys, "frozen", False):
     OUT_DIR = os.path.dirname(sys.executable)
@@ -117,6 +131,159 @@ def temp_fg(v):
     return BLUE if v < 75 else RED
 
 
+# ---- NeckFX preset switching (edits assettocorsa/extension/config/neck.ini) ----
+NECKFX_PRESETS = {
+    "OFF": {
+        ("BASIC", "ENABLED"): "0",  # takes full effect on session reload
+        # zero the movement so it also goes neutral live (ENABLED flag isn't hot-reloaded)
+        ("ALIGNMENT_BASE", "ALIGN_WITH_VELOCITY"): "0.0",
+        ("ALIGNMENT_BASE", "ALIGN_WITH_STEERING"): "0.0",
+        ("ALIGNMENT_BASE", "HORIZON_LOCK"): "0.0",
+        ("ALIGNMENT_BASE", "G_TILT_X"): "0.0",
+        ("ALIGNMENT_BASE", "G_TILT_Z"): "0.0",
+        ("LOOKAHEAD", "GAIN"): "0.0",
+    },
+    "DRIFT": {
+        ("BASIC", "ENABLED"): "1",
+        ("SCRIPT", "ENABLED"): "0",  # use base sections so values below apply predictably
+        ("ALIGNMENT_BASE", "ALIGN_WITH_VELOCITY"): "0.6",
+        ("ALIGNMENT_BASE", "ALIGN_WITH_STEERING"): "0.0",
+        ("ALIGNMENT_BASE", "HORIZON_LOCK"): "0.2",
+        ("LOOKAHEAD", "GAIN"): "0.3",
+    },
+    "GRIP": {
+        ("BASIC", "ENABLED"): "1",
+        ("SCRIPT", "ENABLED"): "0",
+        ("ALIGNMENT_BASE", "ALIGN_WITH_VELOCITY"): "0.4",
+        ("ALIGNMENT_BASE", "ALIGN_WITH_STEERING"): "0.2",
+        ("ALIGNMENT_BASE", "HORIZON_LOCK"): "0.3",
+        ("LOOKAHEAD", "GAIN"): "0.6",
+    },
+}
+NECKFX_CYCLE = ["OFF", "DRIFT", "GRIP"]
+_KEY_RE = re.compile(r'^(\s*)([A-Za-z0-9_]+)(\s*)=(\s*)([^;\r\n]*?)(\s*)(;.*)?$')
+
+
+def _find_ac_root():
+    steam_dirs = [r"C:\Program Files (x86)\Steam", r"C:\Program Files\Steam"]
+    for sd in list(steam_dirs):
+        vdf = os.path.join(sd, "steamapps", "libraryfolders.vdf")
+        try:
+            with open(vdf, "r", encoding="utf-8", errors="replace") as fh:
+                txt = fh.read()
+            for m in re.finditer(r'"path"\s*"([^"]+)"', txt):
+                steam_dirs.append(m.group(1).replace("\\\\", "\\"))
+        except Exception:
+            pass
+    for sd in steam_dirs:
+        p = os.path.join(sd, "steamapps", "common", "assettocorsa")
+        if os.path.isdir(p):
+            return p
+    return None
+
+
+AC_ROOT = _find_ac_root()
+NECK_INI = os.path.join(AC_ROOT, "extension", "config", "neck.ini") if AC_ROOT else None
+
+
+def _read_keys(path, keys):
+    got = {}
+    section = None
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                s = line.strip()
+                if s.startswith("[") and s.endswith("]"):
+                    section = s[1:-1]
+                    continue
+                m = _KEY_RE.match(line)
+                if m and section is not None and (section, m.group(2)) in keys:
+                    got[(section, m.group(2))] = m.group(5)
+    except Exception:
+        pass
+    return got
+
+
+def read_neck_mode(path):
+    if not path or not os.path.exists(path):
+        return "OFF"
+    v = _read_keys(path, {("BASIC", "ENABLED"), ("ALIGNMENT_BASE", "ALIGN_WITH_STEERING")})
+    if v.get(("BASIC", "ENABLED"), "0").strip() == "0":
+        return "OFF"
+    try:
+        return "DRIFT" if float(v.get(("ALIGNMENT_BASE", "ALIGN_WITH_STEERING"), "0")) == 0.0 else "GRIP"
+    except Exception:
+        return "GRIP"
+
+
+def backup_neck_once(path):
+    bak = path + ".ggbak"
+    if not os.path.exists(bak):
+        shutil.copy2(path, bak)
+
+
+def patch_neck_ini(path, preset_name):
+    changes = NECKFX_PRESETS[preset_name]
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        raw = fh.read()
+    nl = "\r\n" if "\r\n" in raw else "\n"
+    lines = raw.replace("\r\n", "\n").split("\n")
+    section = None
+    out = []
+    for line in lines:
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            section = s[1:-1]
+            out.append(line)
+            continue
+        m = _KEY_RE.match(line)
+        if m and section is not None and (section, m.group(2)) in changes:
+            indent, key = m.group(1), m.group(2)
+            comment = m.group(7) or ""
+            new = "{0}{1}={2}".format(indent, key, changes[(section, key)])
+            if comment:
+                new += " " + comment
+            out.append(new)
+        else:
+            out.append(line)
+    with open(path, "w", encoding="utf-8", newline="") as fh:
+        fh.write(nl.join(out))
+
+
+# ---- Autostart at login (HKCU Run key; not a service) ----
+_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+
+
+def _startup_command():
+    if getattr(sys, "frozen", False):
+        return '"{0}" --tray'.format(sys.executable)
+    pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+    return '"{0}" "{1}" --tray'.format(pyw, os.path.abspath(__file__))
+
+
+def is_autostart():
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY) as k:
+            winreg.QueryValueEx(k, APP_REG_NAME)
+        return True
+    except Exception:
+        return False
+
+
+def set_autostart(on):
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
+            if on:
+                winreg.SetValueEx(k, APP_REG_NAME, 0, winreg.REG_SZ, _startup_command())
+            else:
+                try:
+                    winreg.DeleteValue(k, APP_REG_NAME)
+                except FileNotFoundError:
+                    pass
+    except Exception:
+        pass
+
+
 class App:
     def __init__(self, root):
         self.root = root
@@ -134,7 +301,12 @@ class App:
         self.lap_rows = []          # [(lap_no, time_ms, max_kmh), ...] for current stint
         self.prev_completed = -1
         self.cur_max = 0.0
+        self.neck_mode = read_neck_mode(NECK_INI)
+        self.tray = None
         self._build()
+        self._setup_tray()
+        if HAS_TRAY and "--tray" in sys.argv:
+            self.root.withdraw()
         self._attach()
         self.poll()
 
@@ -161,12 +333,12 @@ class App:
 
     def _build(self):
         r = self.root
-        r.title("GG Telemetry Logger")
+        r.title(APP_NAME)
         r.configure(bg=BG)
-        r.geometry("330x600")
+        r.geometry("330x660")
         r.resizable(False, False)
 
-        self._lab(r, "GG TELEMETRY LOGGER", fg=TEXT, font=("Segoe UI Semibold", 13)).pack(pady=(12, 2))
+        self._lab(r, "ASSETTO CORSA LOGGER", fg=TEXT, font=("Segoe UI Semibold", 13)).pack(pady=(12, 2))
         self.status = self._lab(r, "○  WAITING FOR SIM", fg=GREY, font=("Segoe UI", 14, "bold"))
         self.status.pack(pady=(0, 6))
         self.carlbl = self._lab(r, "—", fg=MUTED, font=("Segoe UI", 10))
@@ -211,6 +383,15 @@ class App:
         self.savedlbl = self._lab(r, "saved: -", fg=MUTED, font=("Consolas", 9))
         self.savedlbl.pack()
 
+        neck = tk.Frame(r, bg=BG)
+        neck.pack(pady=(12, 0))
+        self.neck_btn = tk.Button(neck, text="NeckFX: OFF", command=self.cycle_neck,
+                                  bg=CARD, fg=GREY, relief="flat", padx=12, pady=4, width=16,
+                                  activebackground="#2a2f38", activeforeground=TEXT)
+        self.neck_btn.pack()
+        self.neckhint = self._lab(r, "", fg=MUTED, font=("Segoe UI", 8))
+        self.neckhint.pack()
+
         btns = tk.Frame(r, bg=BG)
         btns.pack(pady=12)
         tk.Button(btns, text="Open folder", command=lambda: os.startfile(OUT_DIR),
@@ -219,7 +400,8 @@ class App:
         tk.Button(btns, text="Quit", command=self.quit,
                   bg=CARD, fg=TEXT, relief="flat", padx=10, pady=4,
                   activebackground="#2a2f38", activeforeground=TEXT).pack(side="left", padx=4)
-        r.protocol("WM_DELETE_WINDOW", self.quit)
+        self._paint_neck()
+        r.protocol("WM_DELETE_WINDOW", self.on_close)
 
     # ---------- shared memory ----------
     def _attach(self):
@@ -407,12 +589,123 @@ class App:
     def _set_status(self, text, color):
         self.status.config(text=text, fg=color)
 
+    # ---------- NeckFX ----------
+    def _paint_neck(self):
+        colors = {"OFF": GREY, "DRIFT": BLUE, "GRIP": GREEN}
+        self.neck_btn.config(text="NeckFX: " + self.neck_mode, fg=colors.get(self.neck_mode, TEXT))
+
+    def _apply_neck(self, mode):
+        self.neck_mode = mode
+        ok, msg = True, "re-enter session to apply"
+        if not NECK_INI or not os.path.exists(NECK_INI):
+            ok, msg = False, "neck.ini not found"
+        else:
+            try:
+                backup_neck_once(NECK_INI)
+                patch_neck_ini(NECK_INI, mode)
+            except Exception as e:
+                ok, msg = False, "err: " + str(e)[:28]
+        self.neckhint.config(text=msg, fg=(MUTED if ok else RED))
+        self._paint_neck()
+        if self.tray is not None:
+            try:
+                self.tray.update_menu()
+            except Exception:
+                pass
+
+    def cycle_neck(self):
+        i = NECKFX_CYCLE.index(self.neck_mode) if self.neck_mode in NECKFX_CYCLE else 0
+        self._apply_neck(NECKFX_CYCLE[(i + 1) % len(NECKFX_CYCLE)])
+
+    # ---------- tray ----------
+    def _tray_image(self):
+        img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+        d.rounded_rectangle([4, 4, 59, 59], radius=12, fill=(29, 33, 41, 255))
+        d.text((15, 22), "AC", fill=(74, 163, 255, 255))
+        return img
+
+    def _setup_tray(self):
+        if not HAS_TRAY:
+            return
+        neck_menu = pystray.Menu(
+            pystray.MenuItem("OFF", lambda i, it: self._tray_neck("OFF"),
+                             checked=lambda it: self.neck_mode == "OFF", radio=True),
+            pystray.MenuItem("DRIFT", lambda i, it: self._tray_neck("DRIFT"),
+                             checked=lambda it: self.neck_mode == "DRIFT", radio=True),
+            pystray.MenuItem("GRIP", lambda i, it: self._tray_neck("GRIP"),
+                             checked=lambda it: self.neck_mode == "GRIP", radio=True),
+        )
+        menu = pystray.Menu(
+            pystray.MenuItem("Show", lambda i, it: self._tray_show(), default=True),
+            pystray.MenuItem(lambda it: "NeckFX: " + self.neck_mode, neck_menu),
+            pystray.MenuItem("Run at startup", lambda i, it: self._tray_autostart(),
+                             checked=lambda it: is_autostart()),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Quit", lambda i, it: self._tray_quit()),
+        )
+        self.tray = pystray.Icon(APP_REG_NAME, self._tray_image(), APP_NAME, menu)
+        threading.Thread(target=self.tray.run, daemon=True).start()
+
+    def _tray_show(self):
+        self.root.after(0, lambda: (self.root.deiconify(), self.root.lift()))
+
+    def _tray_neck(self, mode):
+        self.root.after(0, lambda: self._apply_neck(mode))
+
+    def _tray_autostart(self):
+        set_autostart(not is_autostart())
+        if self.tray is not None:
+            self.tray.update_menu()
+
+    def _tray_quit(self):
+        self.root.after(0, self.quit)
+
+    def on_close(self):
+        if HAS_TRAY and self.tray is not None:
+            self.root.withdraw()
+        else:
+            self.quit()
+
     def quit(self):
         self._close()
+        if self.tray is not None:
+            try:
+                self.tray.stop()
+            except Exception:
+                pass
         self.root.destroy()
 
 
+_MUTEX_HANDLE = None
+
+
+def single_instance_ok():
+    """True if we are the first instance; False if one is already running."""
+    global _MUTEX_HANDLE
+    try:
+        k = ctypes.windll.kernel32
+        _MUTEX_HANDLE = k.CreateMutexW(None, False, "AssettoCorsaLogger_singleton")
+        return k.GetLastError() != 183  # 183 = ERROR_ALREADY_EXISTS
+    except Exception:
+        return True  # never block startup if the check itself fails
+
+
+def show_existing_window():
+    try:
+        u = ctypes.windll.user32
+        hwnd = u.FindWindowW(None, APP_NAME)
+        if hwnd:
+            u.ShowWindow(hwnd, 9)  # SW_RESTORE
+            u.SetForegroundWindow(hwnd)
+    except Exception:
+        pass
+
+
 def main():
+    if not single_instance_ok():
+        show_existing_window()
+        return
     root = tk.Tk()
     App(root)
     root.mainloop()
