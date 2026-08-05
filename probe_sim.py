@@ -14,12 +14,20 @@ import time
 import sim_shm
 from sim_shm import AC, ACC
 
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
 SAMPLES = 40
 INTERVAL = 0.1
 
 
 def verdict(ok, note=""):
-    return ("ok" if ok else "SUSPECT") + ((" — " + note) if note else "")
+    """The note explains a failure, so it must not be printed next to an "ok"."""
+    if ok:
+        return "ok"
+    return "SUSPECT" + ((" - " + note) if note else "")
 
 
 def main():
@@ -59,9 +67,10 @@ def main():
         v = seen[key]
         return min(v), max(v)
 
+    # not "> 0": a parked car still jitters at ~0.04 km/h, which would read as ok
     lo, hi = rng("speed")
     print("{0:<20} {1:>8.1f} .. {2:<8.1f} {3}".format(
-        "speed_kmh", lo, hi, verdict(hi > 0, "car never moved" if hi <= 0 else "")))
+        "speed_kmh", lo, hi, verdict(hi > 1.0, "car never moved, drive while probing")))
 
     if game == AC:
         print("\nAC has no isValidLap / fuelXLap / brakeTemp to check.")
@@ -72,12 +81,15 @@ def main():
         k = "btemp_" + w
         lo, hi = rng(k)
         print("{0:<20} {1:>8.1f} .. {2:<8.1f} {3}".format(
-            k, lo, hi, verdict(5 < hi < 1200, "outside 5..1200 C — offsets suspect")))
+            k, lo, hi, verdict(5 < hi < 1200, "outside 5..1200 C, offsets suspect")))
 
+    # Zero is the expected answer here, so ok/SUSPECT would read backwards:
+    # the official doc calls this a friction coefficient, the field returns 0.
     lo, hi = rng("surfaceGrip")
     print("{0:<20} {1:>8.3f} .. {2:<8.3f} {3}".format(
         "surfaceGrip", lo, hi,
-        verdict(hi > 0, "always 0 — matches PyAccSharedMemory, keep it unlogged")))
+        "always 0, as expected - not logged" if hi == 0
+        else "NON-ZERO - the grip column is worth adding after all"))
 
     for k in ("idealLineOn", "isInPitLane", "isValidLap"):
         vals = sorted(set(seen[k]))
