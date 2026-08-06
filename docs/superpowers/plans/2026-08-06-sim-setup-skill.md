@@ -134,7 +134,12 @@ class TestLoggerState(unittest.TestCase):
         self.assertEqual(logger_state.read_state()["logs_dir"], "C:/second")
 
     def test_write_never_raises_on_a_bad_location(self):
-        os.environ["STINTLOGGER_STATE_DIR"] = os.path.join(self._tmp.name, "x\0y")
+        # A file standing where the directory should be: makedirs cannot win,
+        # and write_state must report failure rather than take the logger down.
+        blocker = os.path.join(self._tmp.name, "blocker")
+        with open(blocker, "w", encoding="utf-8") as fh:
+            fh.write("not a directory")
+        os.environ["STINTLOGGER_STATE_DIR"] = os.path.join(blocker, "sub")
         self.assertFalse(logger_state.write_state("C:/logs", "1.1.0"))
 
 
