@@ -42,6 +42,8 @@
 | `tests/test_logs_dir.py` | тести порядку пошуку |
 | `tests/test_setup_io.py` | тести читання й правки сетапів |
 | `tests/test_discover.py` | тести перевірки готовності |
+| `tests/synth_log.py` | генератор синтетичного ACC-логу для тестів |
+| `tests/test_analyzer_defaults.py` | аналізатори знаходять логи без аргументів |
 
 **Змінюємо:**
 
@@ -518,7 +520,7 @@ git commit -m "Add one search order for the telemetry folder, shared by all cons
 
 **Files:**
 - Modify: `trail_report.py:18-23`, `drift_report.py:9-11`, `analyze_ac.py:8-10`, `race_report.py:9-11`
-- Test: перевірка вручну командою (поведінковий критерій 8.4)
+- Create: `tests/synth_log.py`, `tests/test_analyzer_defaults.py`
 
 **Interfaces:**
 - Consumes: `logs_dir.resolve()` з Task 3
@@ -552,7 +554,157 @@ folder = logs_dir.resolve()["path"] or os.path.dirname(os.path.abspath(__file__)
 
 У `trail_report.py` рядок з `folder` стоїть перед `args = sys.argv[1:]` — порядок не змінювати, явний аргумент і далі має пріоритет над дефолтом.
 
-- [ ] **Step 3: Перевірити, що явний аргумент і далі працює**
+- [ ] **Step 3: Написати автоматичний тест на дефолт**
+
+Поведінку змінюємо — значить її треба перевіряти тестом, а не тільки руками.
+Фікстуру не комітимо (справжній лог — мегабайти), а генеруємо в тимчасову папку.
+
+`tests/synth_log.py`:
+
+```python
+"""Write a synthetic ACC log that the analyzers can actually chew on.
+
+Not committed as a file: a real stint is megabytes. Generated per test run
+instead, with a shape close enough to a real session that the analyzers reach
+their normal code paths - braking, cornering, several laps.
+"""
+
+import csv
+import math
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import sim_shm
+
+HZ = 50
+LAP_S = 60
+LAPS = 3
+
+
+def write(folder, name="synthetic_ACC_PRACTICE.csv"):
+    os.makedirs(folder, exist_ok=True)
+    cols = sim_shm.cols_for(sim_shm.ACC)
+    path = os.path.join(folder, name)
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(cols)
+        for lap in range(LAPS):
+            for i in range(LAP_S * HZ):
+                t = lap * LAP_S + i / float(HZ)
+                w.writerow(_row(cols, t, lap))
+    return path
+
+
+def _row(cols, t, lap):
+    phase = (t % 10.0) / 10.0
+    braking = 1.0 if 0.05 < phase < 0.25 else 0.0
+    steer = math.sin(phase * math.pi * 2) * 0.6
+    speed = 240 - 120 * braking - 40 * abs(steer)
+    d = dict((c, "0") for c in cols)
+    d.update({
+        "t": "{0:.3f}".format(t), "lap": lap,
+        "pos": "{0:.5f}".format((t % LAP_S) / LAP_S),
+        "speed_kmh": "{0:.2f}".format(speed), "rpm": int(3000 + speed * 20),
+        "gear": max(1, int(speed // 40)),
+        "gas": "{0:.3f}".format(0.0 if braking else min(1.0, 0.4 + phase)),
+        "brake": "{0:.3f}".format(braking * 0.8),
+        "steer": "{0:.4f}".format(steer),
+        "gx": "{0:.3f}".format(-1.8 * braking), "gy": "0.100",
+        "gz": "{0:.3f}".format(steer * 1.5),
+        "tc": "0.00", "abs": "0.00", "fuel": "{0:.2f}".format(60 - t * 0.03),
+        "inpit": 0, "last_ms": 60000, "best_ms": 59500,
+        "session": "PRACTICE", "race_pos": 4,
+        "heading": "{0:.5f}".format(math.sin(t / 5.0)),
+        "vel_x": "{0:.4f}".format(speed / 3.6 * math.cos(steer)),
+        "vel_y": "0.0000",
+        "vel_z": "{0:.4f}".format(speed / 3.6 * math.sin(steer) * 0.2),
+        "ideal_line": 0, "valid_lap": 1,
+        "fuel_x_lap": "2.850", "fuel_est_laps": "18.00",
+    })
+    for i, wheel in enumerate(("fl", "fr", "rl", "rr")):
+        d["slip_" + wheel] = "{0:.3f}".format(abs(steer) * 0.4)
+        d["press_" + wheel] = "27.6"
+        d["ttemp_" + wheel] = "84.0"
+        d["susp_" + wheel] = "0.0300"
+        d["btemp_" + wheel] = "{0:.1f}".format(300 + 200 * braking)
+    return [d[c] for c in cols]
+```
+
+`tests/test_analyzer_defaults.py`:
+
+```python
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import synth_log
+
+ANALYZERS = ["trail_report.py", "drift_report.py", "analyze_ac.py", "race_report.py"]
+
+
+class TestAnalyzerDefaults(unittest.TestCase):
+    """Run with no arguments at all: the analyzers must find logs where the
+    logger writes them, not only next to their own file. Before this change they
+    died with IndexError on an empty glob."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.logs = os.path.join(cls._tmp.name, "logs", "spa", "test_gt3", "2026-08-06")
+        synth_log.write(cls.logs)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def _run(self, script, cwd, logs):
+        env = dict(os.environ)
+        env["STINT_LOGS"] = logs
+        env["STINTLOGGER_STATE_DIR"] = os.path.join(self._tmp.name, "nostate")
+        env["SIM_COACH_HOME"] = os.path.join(self._tmp.name, "nocoach")
+        return subprocess.run([sys.executable, os.path.join(ROOT, script)],
+                              cwd=cwd, env=env, capture_output=True, text=True,
+                              timeout=120)
+
+    def test_each_analyzer_runs_from_an_unrelated_directory(self):
+        for script in ANALYZERS:
+            with self.subTest(script=script):
+                done = self._run(script, self._tmp.name, os.path.dirname(
+                    os.path.dirname(os.path.dirname(self.logs))))
+                self.assertEqual(done.returncode, 0,
+                                 "{0} failed:
+{1}".format(script, done.stderr[-800:]))
+                self.assertTrue(done.stdout.strip(), script + " printed nothing")
+
+    def test_explicit_path_still_wins(self):
+        csv_path = os.path.join(self.logs, "synthetic_ACC_PRACTICE.csv")
+        env = dict(os.environ)
+        env["STINT_LOGS"] = os.path.join(self._tmp.name, "empty")
+        done = subprocess.run([sys.executable, os.path.join(ROOT, "trail_report.py"), csv_path],
+                              cwd=self._tmp.name, env=env, capture_output=True,
+                              text=True, timeout=120)
+        self.assertEqual(done.returncode, 0, done.stderr[-800:])
+        self.assertIn("synthetic_ACC_PRACTICE.csv", done.stdout)
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 4: Run the test to verify it passes**
+
+Run: `python -m unittest tests.test_analyzer_defaults -v`
+Expected: 2 tests PASS. Якщо `test_each_analyzer_runs_from_an_unrelated_directory`
+падає з `IndexError`, значить дефолт у якомусь з чотирьох файлів не замінений.
+
+- [ ] **Step 5: Перевірити, що явний аргумент і далі працює**
 
 ```bash
 F=$(python -c "import logs_dir,glob,os; p=logs_dir.resolve()['path']; print(sorted(glob.glob(os.path.join(p,'**','*.csv'),recursive=True))[-1])")
@@ -561,7 +713,7 @@ python drift_report.py "$F" | tail -3
 ```
 Expected: обидва друкують зведення без винятків.
 
-- [ ] **Step 4: Перевірити дефолт із папки, де CSV немає**
+- [ ] **Step 6: Перевірити дефолт із папки, де CSV немає**
 
 ```bash
 mkdir -p /tmp/elsewhere && cd /tmp/elsewhere
@@ -569,7 +721,7 @@ STINT_LOGS="" python ~/sim-telemetry/analyze_ac.py 2>&1 | tail -2
 ```
 Expected: працює через `state.json` (логер уже його записав у Task 2), а не падає з `IndexError: list index out of range`.
 
-- [ ] **Step 5: Перевірити явний `STINT_LOGS` на шлях поза репо (крит. 8.4)**
+- [ ] **Step 7: Перевірити явний `STINT_LOGS` на шлях поза репо (крит. 8.4)**
 
 ```bash
 mkdir -p /tmp/logs-elsewhere && cp "$F" /tmp/logs-elsewhere/
@@ -577,11 +729,11 @@ cd /tmp && STINT_LOGS=/tmp/logs-elsewhere python ~/sim-telemetry/race_report.py 
 ```
 Expected: читає файл із `/tmp/logs-elsewhere`, а не з репозиторію.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 cd ~/sim-telemetry
-git add trail_report.py drift_report.py analyze_ac.py race_report.py
+git add trail_report.py drift_report.py analyze_ac.py race_report.py         tests/synth_log.py tests/test_analyzer_defaults.py
 git commit -m "Analyzers look for logs where the logger actually writes them"
 ```
 
