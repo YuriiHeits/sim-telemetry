@@ -160,7 +160,10 @@ NECKFX_PRESETS = {
         ("LOOKAHEAD", "GAIN"): "0.6",
     },
 }
-NECKFX_CYCLE = ["OFF", "DRIFT", "GRIP"]
+# MINE is deliberately not a preset: its values are not a table, they are the
+# neck.ini the user had before we ever touched it (kept in the .ggbak snapshot).
+NECK_MINE = "MINE"
+NECKFX_CYCLE = [NECK_MINE, "OFF", "DRIFT", "GRIP"]
 _KEY_RE = re.compile(r'^(\s*)([A-Za-z0-9_]+)(\s*)=(\s*)([^;\r\n]*?)(\s*)(;.*)?$')
 
 
@@ -204,16 +207,26 @@ def _read_keys(path, keys):
     return got
 
 
+def _same_value(a, b):
+    try:
+        return float(a) == float(b)
+    except (TypeError, ValueError):
+        return a.strip() == b.strip()
+
+
 def read_neck_mode(path):
+    """Which of our presets the file is, or MINE when it is anything else.
+
+    Guessing the mode from a couple of keys labelled a stranger's own config as
+    one of ours, and then the first click silently replaced their values.
+    """
     if not path or not os.path.exists(path):
         return "OFF"
-    v = _read_keys(path, {("BASIC", "ENABLED"), ("ALIGNMENT_BASE", "ALIGN_WITH_STEERING")})
-    if v.get(("BASIC", "ENABLED"), "0").strip() == "0":
-        return "OFF"
-    try:
-        return "DRIFT" if float(v.get(("ALIGNMENT_BASE", "ALIGN_WITH_STEERING"), "0")) == 0.0 else "GRIP"
-    except Exception:
-        return "GRIP"
+    for name, changes in NECKFX_PRESETS.items():
+        got = _read_keys(path, set(changes))
+        if len(got) == len(changes) and all(_same_value(got[k], v) for k, v in changes.items()):
+            return name
+    return NECK_MINE
 
 
 def backup_neck_once(path):
@@ -222,30 +235,75 @@ def backup_neck_once(path):
         shutil.copy2(path, bak)
 
 
+def restore_neck_ini(path):
+    """Put the pre-first-edit snapshot back as a whole file.
+
+    Copying the file beats merging keys back: only this returns sections we have
+    no preset for at all — a script-driven NeckFX setup, above all.
+
+    False means there is no snapshot, i.e. we never edited anything and the file
+    on disk already is the user's own.
+    """
+    bak = path + ".ggbak"
+    if not os.path.exists(bak):
+        return False
+    shutil.copy2(bak, path)
+    return True
+
+
 def patch_neck_ini(path, preset_name):
+    """Apply a preset, adding whatever the file does not already have.
+
+    Replacing only the keys that happen to exist applied a preset half way and
+    said nothing about it: a CSP build without [LOOKAHEAD] would answer a click
+    on DRIFT with something that is not DRIFT.
+    """
     changes = NECKFX_PRESETS[preset_name]
-    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+    # newline="" or universal newlines hands us "\n" for a CRLF file and every
+    # save would quietly convert the user's file to LF
+    with open(path, "r", encoding="utf-8", errors="replace", newline="") as fh:
         raw = fh.read()
     nl = "\r\n" if "\r\n" in raw else "\n"
     lines = raw.replace("\r\n", "\n").split("\n")
-    section = None
-    out = []
+
+    # blocks of (section, its lines including the header) — a key belongs to the
+    # last header above it, so this is the unit both edits and inserts work on
+    blocks = [(None, [])]
     for line in lines:
         s = line.strip()
         if s.startswith("[") and s.endswith("]"):
-            section = s[1:-1]
-            out.append(line)
-            continue
-        m = _KEY_RE.match(line)
-        if m and section is not None and (section, m.group(2)) in changes:
-            indent, key = m.group(1), m.group(2)
-            comment = m.group(7) or ""
-            new = "{0}{1}={2}".format(indent, key, changes[(section, key)])
-            if comment:
-                new += " " + comment
-            out.append(new)
+            blocks.append((s[1:-1], [line]))
         else:
-            out.append(line)
+            blocks[-1][1].append(line)
+
+    done = set()
+    for section, body in blocks:
+        for i, line in enumerate(body):
+            m = _KEY_RE.match(line)
+            if not m or (section, m.group(2)) not in changes:
+                continue
+            key = (section, m.group(2))
+            comment = m.group(7) or ""
+            body[i] = "{0}{1}={2}".format(m.group(1), m.group(2), changes[key])
+            if comment:
+                body[i] += " " + comment
+            done.add(key)
+
+    for section, body in blocks:
+        missing = [k for k in changes if k[0] == section and k not in done]
+        at = len(body)
+        while at > 1 and not body[at - 1].strip():
+            at -= 1  # before the blank line that separates us from the next section
+        for key in missing:
+            body.insert(at, "{0}={1}".format(key[1], changes[key]))
+            at += 1
+            done.add(key)
+
+    out = [line for _, body in blocks for line in body]
+    for section in dict.fromkeys(k[0] for k in changes if k not in done):
+        out += ["", "[" + section + "]"]
+        out += ["{0}={1}".format(k[1], v) for k, v in changes.items()
+                if k[0] == section and k not in done]
     with open(path, "w", encoding="utf-8", newline="") as fh:
         fh.write(nl.join(out))
 
@@ -719,8 +777,12 @@ class App:
             ok, msg = False, "neck.ini not found"
         else:
             try:
-                backup_neck_once(NECK_INI)
-                patch_neck_ini(NECK_INI, mode)
+                if mode == NECK_MINE:
+                    if not restore_neck_ini(NECK_INI):
+                        msg = "nothing to restore: never edited"
+                else:
+                    backup_neck_once(NECK_INI)
+                    patch_neck_ini(NECK_INI, mode)
             except Exception as e:
                 ok, msg = False, "err: " + str(e)[:28]
         self.neckhint.config(text=msg, fg=(MUTED if ok else RED))
@@ -747,6 +809,8 @@ class App:
         if not HAS_TRAY:
             return
         neck_menu = pystray.Menu(
+            pystray.MenuItem("MINE (restore)", lambda i, it: self._tray_neck(NECK_MINE),
+                             checked=lambda it: self.neck_mode == NECK_MINE, radio=True),
             pystray.MenuItem("OFF", lambda i, it: self._tray_neck("OFF"),
                              checked=lambda it: self.neck_mode == "OFF", radio=True),
             pystray.MenuItem("DRIFT", lambda i, it: self._tray_neck("DRIFT"),
