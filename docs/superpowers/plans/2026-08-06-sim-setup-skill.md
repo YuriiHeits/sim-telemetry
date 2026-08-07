@@ -261,6 +261,12 @@ class TestLoggerWritesState(unittest.TestCase):
 Run: `python -m unittest tests.test_logger_state -v`
 Expected: FAIL — `AttributeError: module 'stint_logger' has no attribute 'APP_VERSION'`
 
+**Якщо тест одразу проходить** — це не помилка. План автооновлення
+(`2026-08-07-auto-update.md`) вводить ту саму константу, і якщо він виконався
+першим, `APP_VERSION` уже у файлі. Тоді не додавай другу: константа одна на файл,
+дві розійшлися б за тиждень. Запиши це у звіт і переходь до обв'язки `state.json`,
+яка й є суттю цієї задачі.
+
 - [ ] **Step 3: Write minimal implementation**
 
 У `stint_logger.pyw` після `APP_REG_NAME`:
