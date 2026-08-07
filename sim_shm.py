@@ -112,11 +112,25 @@ class ACPhysics(ctypes.Structure):
         ("cgHeight", ctypes.c_float), ("carDamage", ctypes.c_float * 5),
         ("numberOfTyresOut", ctypes.c_int32), ("pitLimiterOn", ctypes.c_int32),
         ("abs", ctypes.c_float),
+        # --- padding fields, never read, present only to reach clutch ---
+        ("kersCharge", ctypes.c_float), ("kersInput", ctypes.c_float),
+        ("autoShifterOn", ctypes.c_int32), ("rideHeight", ctypes.c_float * 2),
+        ("turboBoost", ctypes.c_float), ("ballast", ctypes.c_float),
+        ("airDensity", ctypes.c_float), ("airTemp", ctypes.c_float),
+        ("roadTemp", ctypes.c_float), ("localAngularVel", ctypes.c_float * 3),
+        ("finalFF", ctypes.c_float), ("performanceMeter", ctypes.c_float),
+        ("engineBrake", ctypes.c_int32), ("ersRecoveryLevel", ctypes.c_int32),
+        ("ersPowerLevel", ctypes.c_int32), ("ersHeatCharging", ctypes.c_int32),
+        ("ersIsCharging", ctypes.c_int32), ("kersCurrentKJ", ctypes.c_float),
+        ("drsAvailable", ctypes.c_int32), ("drsEnabled", ctypes.c_int32),
+        ("brakeTemp", ctypes.c_float * 4),
+        # --- wanted ---
+        ("clutch", ctypes.c_float),
     ]
 
 
 class ACCPhysics(ctypes.Structure):
-    """Identical to AC up to abs; declared further only to reach brakeTemp.
+    """Identical to AC up to clutch; declared further only to reach brakeTemp.
 
     drs is an int here (AC declares it float) — same 4 bytes, so nothing shifts.
     """
@@ -234,7 +248,7 @@ class Static(ctypes.Structure):
 
 # ----------------------------------------------------------------------- columns
 
-CORE_COLS = ["t", "lap", "pos", "speed_kmh", "rpm", "gear", "gas", "brake", "steer",
+CORE_COLS = ["t", "lap", "pos", "speed_kmh", "rpm", "gear", "gas", "brake", "clutch", "steer",
              "gx", "gy", "gz", "slip_fl", "slip_fr", "slip_rl", "slip_rr",
              "press_fl", "press_fr", "press_rl", "press_rr",
              "ttemp_fl", "ttemp_fr", "ttemp_rl", "ttemp_rr",
@@ -337,7 +351,7 @@ class SimReader:
         p, g = self.phys, self.graph
         out = [_f(t, 3), g.completedLaps, _f(g.normalizedCarPosition, 5),
                _f(p.speedKmh, 2), p.rpms, p.gear,
-               _f(p.gas), _f(p.brake), _f(p.steerAngle, 4),
+               _f(p.gas), _f(p.brake), _f(p.clutch), _f(p.steerAngle, 4),
                _f(p.accG[0]), _f(p.accG[1]), _f(p.accG[2])]
         out += _f4(p.wheelSlip)
         out += _f4(p.wheelsPressure, 2)
