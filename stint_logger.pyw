@@ -300,7 +300,12 @@ class App:
         self.reattach_t = 0.0
         self.game_check_t = 0.0
         self.session_key = None
-        self.lap_rows = []          # [(lap_no, time_ms, max_kmh, valid), ...]
+        self.lap_rows = []          # [(seq, lap_no, time_ms, max_kmh, valid, log_tag), ...]
+        # The game restarts its lap counter on every stint, so it cannot identify a
+        # lap within a session. `seq` can, and that is what the fuel model selects on.
+        self.lap_seq = 0
+        self.log_tag = "-"
+        self.row_seq = []           # listbox row -> lap seq (None on a separator row)
         self.prev_completed = -1
         self.cur_max = 0.0
         self.lap_had_pit = False
@@ -389,14 +394,23 @@ class App:
         self.lap_scroll = tk.Scrollbar(lapcard, orient="vertical", width=10,
                                        relief="flat", borderwidth=0,
                                        troughcolor=CARD, bg=GREY, activebackground=MUTED)
+        # selectmode "extended": picking the laps the fuel average runs on is the
+        # whole point of the list now, so the selection has to be visible and multi-row
         self.lap_list = tk.Listbox(lapcard, height=6, bg=CARD, fg=TEXT,
                                    font=("Consolas", 11), activestyle="none",
                                    highlightthickness=0, borderwidth=0,
-                                   selectbackground=CARD, selectforeground=TEXT,
+                                   selectmode="extended", exportselection=False,
+                                   selectbackground=BG, selectforeground=TEXT,
                                    yscrollcommand=self.lap_scroll.set)
         self.lap_scroll.config(command=self.lap_list.yview)
         self.lap_list.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=2)
         self.lap_scroll.pack(side="right", fill="y")
+        self.lap_list.bind("<<ListboxSelect>>", self._on_lap_select)
+        self.lap_list.bind("<Escape>", self._clear_lap_select)
+        self.root.bind("<Escape>", self._clear_lap_select)
+        self.fuel_src = self._lab(r, "fuel: last 3 valid laps", fg=MUTED,
+                                  font=("Segoe UI", 9))
+        self.fuel_src.pack(pady=(2, 0))
         self._refresh_laps()
 
         self._lab(r, "FUEL PLAN", fg=MUTED, font=("Segoe UI", 9)).pack(pady=(12, 2))
@@ -489,14 +503,14 @@ class App:
         self.reader = sim_shm.SimReader(game) if game else None
         if self.reader is not None:
             self.reader.attach()
-        self.fuel.reset()
-        self.session_key = None
-        self.lap_rows = []
+        # Laps and the fuel history deliberately survive this: quitting to the menu
+        # or closing the sim must not wipe the window you were about to read. They
+        # are cleared where they actually stop meaning anything — on a session change.
         self.prev_completed = -1
         self.cur_max = 0.0
         self.lap_had_pit = False
         self.lap_invalid = False
-        self.last_fuel = None
+        self.last_fuel = None       # tank level is meaningless with no sim attached
         self.last_session_ms = None
         self.title_lab.config(text="ACC LOGGER" if game == ACC else "ASSETTO CORSA LOGGER")
         if game == ACC:
@@ -522,14 +536,16 @@ class App:
         if not os.path.isdir(folder):
             os.makedirs(folder)
         tag = sim_shm.sess_name(g.session)
+        self.log_tag = time.strftime("%H-%M-%S")
         path = os.path.join(folder, "{0}_{1}_{2}.csv".format(
-            time.strftime("%H-%M-%S"), self.game, tag))
+            self.log_tag, self.game, tag))
         self.f = open(path, "w", newline="")
         self.w = csv.writer(self.f)
         self.w.writerow(self.reader.cols)
         self.rows = 0
         self.t0 = time.perf_counter()
-        self.lap_rows = []
+        # lap_rows is NOT cleared here: a new file starts on every pit stop, and the
+        # laps you drove before the stop are still part of this session
         self.prev_completed = -1
         self.cur_max = 0.0
         self.lap_had_pit = False
@@ -571,10 +587,18 @@ class App:
             return
 
         p, g, s = r.phys, r.graph, r.stat
-        key = ((s.carModel or "").strip(), (s.track or "").strip())
+        # A session is one track + car + day — the same thing the output folder is,
+        # so the window and the disk never disagree about where a session begins.
+        key = ((s.carModel or "").strip(), (s.track or "").strip(),
+               time.strftime("%Y-%m-%d"))
         if key != self.session_key:
             self.session_key = key
-            self.fuel.reset()      # new car or track: fuel history means nothing
+            self.fuel.reset()      # new car, track or day: the history means nothing
+            self.lap_rows = []
+            self.lap_seq = 0
+            self.prev_completed = -1
+            self._refresh_laps()
+            self._paint_fuel()
         in_pit = r.in_pit_for_finalize()
         self.carlbl.config(text="{0}  @  {1}".format(key[0], key[1]))
 
@@ -628,30 +652,46 @@ class App:
             self.prev_completed = c
         elif c > self.prev_completed:
             valid = not self.lap_invalid
-            self._add_lap(c, g.iLastTime, self.cur_max, valid)
-            self.fuel.lap_completed(p.fuel, g.iLastTime, valid and not self.lap_had_pit)
+            seq = self._add_lap(c, g.iLastTime, self.cur_max, valid)
+            self.fuel.lap_completed(seq, p.fuel, g.iLastTime,
+                                    valid and not self.lap_had_pit)
             self.prev_completed = c
             self.cur_max = 0.0
             self.lap_had_pit = False
             self.lap_invalid = False
 
     def _add_lap(self, lap_no, time_ms, max_kmh, valid):
-        self.lap_rows.append((lap_no, time_ms, max_kmh, valid))
+        self.lap_seq += 1
+        self.lap_rows.append((self.lap_seq, lap_no, time_ms, max_kmh, valid, self.log_tag))
         self._refresh_laps()
+        return self.lap_seq
 
     def _refresh_laps(self):
         # an invalidated lap must not win "best", or a cut corner would show green
-        times = [t for _, t, _, v in self.lap_rows if 0 < t < 600000 and v]
+        times = [t for _, _, t, _, v, _ in self.lap_rows if 0 < t < 600000 and v]
         best = min(times) if times else None
         # follow the newest lap only when already at the bottom, so scrolling back
         # through a long stint is not yanked away every time a lap completes
         at_bottom = self.lap_list.yview()[1] >= 0.999
+        chosen = set(self.fuel.selection() or ())
         self.lap_list.delete(0, "end")
+        self.row_seq = []
         if not self.lap_rows:
             self.lap_list.insert("end", "(no completed laps yet)")
             self.lap_list.itemconfig(0, foreground=MUTED)
+            self.row_seq.append(None)
             return
-        for i, (ln, t, spd, valid) in enumerate(self.lap_rows):
+        prev_tag = None
+        for seq, ln, t, spd, valid, tag in self.lap_rows:
+            # one separator per log: a session spans several files (every pit stop
+            # starts a new one) and the game restarts its lap numbers with each
+            if tag != prev_tag:
+                prev_tag = tag
+                i = self.lap_list.size()
+                self.lap_list.insert("end", " log {0} ".format(tag).center(24, "-"))
+                self.lap_list.itemconfig(i, foreground=GREY)
+                self.row_seq.append(None)
+            i = self.lap_list.size()
             self.lap_list.insert("end", "L{0:<3} {1:>9}  {2:3.0f} km/h".format(
                 ln, fmt_ms(t), spd))
             if not valid:
@@ -661,10 +701,43 @@ class App:
             else:
                 fg = TEXT
             self.lap_list.itemconfig(i, foreground=fg)
+            self.row_seq.append(seq)
+            if seq in chosen:
+                self.lap_list.selection_set(i)
         if at_bottom:
             self.lap_list.see("end")
 
+    def _on_lap_select(self, _event=None):
+        # a separator is not a lap; clicking one must not silently drop the choice
+        for i in self.lap_list.curselection():
+            if i < len(self.row_seq) and self.row_seq[i] is None:
+                self.lap_list.selection_clear(i)
+        seqs = [self.row_seq[i] for i in self.lap_list.curselection()
+                if i < len(self.row_seq) and self.row_seq[i] is not None]
+        self.fuel.set_selection(seqs)
+        self._paint_fuel(self.last_fuel, self.last_session_ms)
+
+    def _clear_lap_select(self, _event=None):
+        self.lap_list.selection_clear(0, "end")
+        self.fuel.set_selection(None)
+        self._paint_fuel(self.last_fuel, self.last_session_ms)
+
     def _paint_fuel(self, fuel_l=None, session_ms=None):
+        sel = self.fuel.selection()
+        if sel:
+            n = sum(1 for s in self.fuel.samples()
+                    if s.lap_no in set(sel) and s.selectable)
+            # the opening lap of a session has no previous fuel level to subtract
+            # from, and a refuelled lap has no meaningful burn — say so rather than
+            # leaving the driver staring at "--" with rows visibly highlighted
+            if n == 0:
+                self.fuel_src.config(fg=AMBER,
+                                     text="fuel: chosen laps have no usable burn  ·  Esc = auto")
+            else:
+                self.fuel_src.config(fg=BLUE, text="fuel: {0} chosen lap{1}  ·  Esc = auto"
+                                     .format(n, "" if n == 1 else "s"))
+        else:
+            self.fuel_src.config(fg=MUTED, text="fuel: last 3 valid laps")
         lpl = self.fuel.l_per_lap()
         self.metrics["llap"].config(text="--" if lpl is None else "{0:.2f}".format(lpl))
 
