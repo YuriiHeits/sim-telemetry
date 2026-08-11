@@ -50,6 +50,7 @@ def main():
     seen = {}
     for _ in range(SAMPLES):
         seen.setdefault("speed", []).append(p.speedKmh)
+        seen.setdefault("clutch", []).append(p.clutch)
         seen.setdefault("session_left_ms", []).append(g.sessionTimeLeft)
         if game == ACC:
             for i, w in enumerate(("fl", "fr", "rl", "rr")):
@@ -71,6 +72,14 @@ def main():
     lo, hi = rng("speed")
     print("{0:<20} {1:>8.1f} .. {2:<8.1f} {3}".format(
         "speed_kmh", lo, hi, verdict(hi > 1.0, "car never moved, drive while probing")))
+
+    # press the clutch fully and release it while probing: the field must span
+    # the full 0..1, and which end means "released" is what tells us the polarity
+    lo, hi = rng("clutch")
+    print("{0:<20} {1:>8.2f} .. {2:<8.2f} {3}".format(
+        "clutch", lo, hi,
+        verdict(0 <= lo and hi <= 1 and hi - lo > 0.5,
+                "pedal never moved, or offsets wrong (expected a 0..1 swing)")))
 
     if game == AC:
         print("\nAC has no isValidLap / fuelXLap / brakeTemp to check.")

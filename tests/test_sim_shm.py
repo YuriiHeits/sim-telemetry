@@ -77,7 +77,7 @@ class TestStructLayout(unittest.TestCase):
         for field in ("packetId", "gas", "brake", "fuel", "gear", "rpms", "steerAngle",
                       "speedKmh", "velocity", "accG", "wheelSlip", "wheelsPressure",
                       "tyreCoreTemperature", "suspensionTravel", "tc", "heading",
-                      "carDamage", "pitLimiterOn", "abs"):
+                      "carDamage", "pitLimiterOn", "abs", "brakeTemp", "clutch"):
             self.assertEqual(getattr(sim_shm.ACPhysics, field).offset,
                              getattr(sim_shm.ACCPhysics, field).offset, field)
         for field in ("packetId", "status", "session", "completedLaps", "position",
