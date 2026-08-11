@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -14,6 +15,11 @@ _spec = importlib.util.spec_from_file_location(
     "stint_logger", os.path.join(ROOT, "stint_logger.pyw"))
 stint_logger = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(stint_logger)
+
+
+def fixture(name):
+    with open(os.path.join(ROOT, "tests", "fixtures", name), encoding="utf-8") as fh:
+        return json.load(fh)
 
 
 class TestVersionFlag(unittest.TestCase):
@@ -53,6 +59,79 @@ class TestVersionCompare(unittest.TestCase):
     def test_a_tag_we_cannot_parse_never_triggers_an_update(self):
         for tag in ("latest", "", "v", "1.x", "release-2026"):
             self.assertFalse(updater.newer(tag, "1.1.0"), tag)
+
+
+class TestPickAsset(unittest.TestCase):
+
+    def test_takes_the_exe_and_its_tag_and_size(self):
+        got = updater.pick_asset(fixture("github_release.json"))
+        self.assertEqual(got["tag"], "v1.2.0")
+        self.assertEqual(got["url"], "https://example.invalid/StintLogger.exe")
+        self.assertEqual(got["size"], 25897150)
+
+    def test_a_release_without_our_asset_is_no_release(self):
+        payload = fixture("github_release.json")
+        payload["assets"] = [a for a in payload["assets"] if a["name"] != "StintLogger.exe"]
+        self.assertIsNone(updater.pick_asset(payload))
+
+    def test_a_release_with_no_assets_at_all(self):
+        payload = fixture("github_release.json")
+        payload["assets"] = []
+        self.assertIsNone(updater.pick_asset(payload))
+
+    def test_a_payload_without_a_tag(self):
+        payload = fixture("github_release.json")
+        del payload["tag_name"]
+        self.assertIsNone(updater.pick_asset(payload))
+
+
+class TestFetchLatest(unittest.TestCase):
+    """The one line that touches the network is injected, so the parsing around
+    it is tested for real while the socket is not."""
+
+    def test_sends_a_user_agent_because_github_answers_403_without_one(self):
+        seen = {}
+
+        def opener(req, timeout=None):
+            seen["ua"] = req.get_header("User-agent")
+            return _Resp(json.dumps(fixture("github_release.json")).encode())
+
+        updater.fetch_latest(opener=opener)
+        self.assertIn("StintLogger", seen["ua"] or "")
+
+    def test_returns_the_asset_on_a_good_answer(self):
+        def opener(req, timeout=None):
+            return _Resp(json.dumps(fixture("github_release.json")).encode())
+
+        self.assertEqual(updater.fetch_latest(opener=opener)["tag"], "v1.2.0")
+
+    def test_a_network_error_is_not_an_update(self):
+        def opener(req, timeout=None):
+            raise OSError("no route to host")
+
+        self.assertIsNone(updater.fetch_latest(opener=opener))
+
+    def test_garbage_instead_of_json_is_not_an_update(self):
+        def opener(req, timeout=None):
+            return _Resp(b"<html>rate limited</html>")
+
+        self.assertIsNone(updater.fetch_latest(opener=opener))
+
+
+class _Resp:
+    """Minimal stand-in for what urlopen returns: a context manager that reads."""
+
+    def __init__(self, body):
+        self.body = body
+
+    def read(self):
+        return self.body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
 
 
 if __name__ == "__main__":

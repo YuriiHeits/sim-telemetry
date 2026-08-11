@@ -43,3 +43,32 @@ def newer(latest, current):
     if a is None or b is None:
         return False
     return a > b
+
+
+def pick_asset(payload, asset_name=ASSET_NAME):
+    """The tag and the exe URL, or None when this release is not usable."""
+    try:
+        tag = payload["tag_name"]
+        for a in payload.get("assets") or []:
+            if a.get("name") == asset_name:
+                return {"tag": tag, "url": a["browser_download_url"],
+                        "size": int(a.get("size") or 0)}
+    except (KeyError, TypeError, ValueError):
+        return None
+    return None
+
+
+def fetch_latest(timeout=5.0, opener=urllib.request.urlopen):
+    """Ask GitHub about the latest release. None on any trouble at all —
+    a logger that cannot reach the internet is a working logger.
+    """
+    req = urllib.request.Request(API_URL, headers={
+        "User-Agent": "StintLogger",
+        "Accept": "application/vnd.github+json",
+    })
+    try:
+        with opener(req, timeout=timeout) as resp:
+            payload = json.loads(resp.read().decode("utf-8", "replace"))
+    except Exception:
+        return None
+    return pick_asset(payload)
