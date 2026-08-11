@@ -72,3 +72,64 @@ def fetch_latest(timeout=5.0, opener=urllib.request.urlopen):
     except Exception:
         return None
     return pick_asset(payload)
+
+
+def update_dir():
+    """Downloads go to LOCALAPPDATA, never next to the exe: that folder can be
+    read-only (Program Files) and we must not fail there."""
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    path = os.path.join(base, "StintLogger", "update")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def looks_like_exe(path):
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(2) == b"MZ"
+    except Exception:
+        return False
+
+
+def version_from_output(text):
+    """"1.2.0" out of "StintLogger 1.2.0" — None if that is not what we got."""
+    parts = (text or "").strip().split()
+    if len(parts) != 2 or parts[0] != "StintLogger":
+        return None
+    return parts[1] if parse_version(parts[1]) else None
+
+
+def download(url, dest, expected_size, opener=urllib.request.urlopen):
+    """True only when the whole file arrived. A partial file is deleted, not kept:
+    a half-downloaded exe that passes no gate is still a landmine.
+    """
+    try:
+        with opener(url, timeout=60) as resp:
+            body = resp.read()
+        if expected_size and len(body) != expected_size:
+            raise ValueError("size mismatch")
+        with open(dest, "wb") as fh:
+            fh.write(body)
+        return True
+    except Exception:
+        try:
+            os.remove(dest)
+        except OSError:
+            pass
+        return False
+
+
+def reports_version(path, expected_tag, run=subprocess.run):
+    """Make the downloaded build say who it is, and check the answer.
+
+    This is the gate: without it, self-replacement means overwriting a working
+    tool with whatever arrived over the network.
+    """
+    if not looks_like_exe(path):
+        return False
+    try:
+        r = run([path, "--version"], capture_output=True, text=True, timeout=15)
+    except Exception:
+        return False
+    got = version_from_output(r.stdout or "")
+    return got is not None and parse_version(got) == parse_version(expected_tag)

@@ -1,8 +1,10 @@
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 
 import updater
@@ -116,6 +118,55 @@ class TestFetchLatest(unittest.TestCase):
             return _Resp(b"<html>rate limited</html>")
 
         self.assertIsNone(updater.fetch_latest(opener=opener))
+
+
+class TestGate(unittest.TestCase):
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def test_a_file_that_is_not_a_windows_binary_is_rejected(self):
+        p = os.path.join(self.dir, "not.exe")
+        with open(p, "wb") as fh:
+            fh.write(b"<html>404 not found</html>")
+        self.assertFalse(updater.looks_like_exe(p))
+
+    def test_a_file_starting_with_mz_passes(self):
+        p = os.path.join(self.dir, "yes.exe")
+        with open(p, "wb") as fh:
+            fh.write(b"MZ\x90\x00")
+        self.assertTrue(updater.looks_like_exe(p))
+
+    def test_a_missing_file_is_rejected(self):
+        self.assertFalse(updater.looks_like_exe(os.path.join(self.dir, "gone.exe")))
+
+    def test_version_is_read_out_of_the_programs_own_greeting(self):
+        self.assertEqual(updater.version_from_output("StintLogger 1.2.0\n"), "1.2.0")
+
+    def test_anything_else_on_stdout_is_no_version(self):
+        for text in ("", "Traceback (most recent call last):", "StintLogger", "1.2.0"):
+            self.assertIsNone(updater.version_from_output(text), text)
+
+    def test_download_writes_the_file_and_checks_the_size(self):
+        body = b"MZ" + b"\x00" * 100
+        p = os.path.join(self.dir, "dl.exe")
+
+        def opener(url, timeout=None):
+            return _Resp(body)
+
+        self.assertTrue(updater.download("https://example.invalid/x", p, len(body), opener))
+        with open(p, "rb") as fh:
+            self.assertEqual(fh.read(), body)
+
+    def test_a_truncated_download_is_discarded(self):
+        p = os.path.join(self.dir, "short.exe")
+
+        def opener(url, timeout=None):
+            return _Resp(b"MZ")
+
+        self.assertFalse(updater.download("https://example.invalid/x", p, 999, opener))
+        self.assertFalse(os.path.exists(p))
 
 
 class _Resp:
