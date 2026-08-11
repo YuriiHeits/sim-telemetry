@@ -8,7 +8,9 @@ is FINALIZED (closed) on pit entry or when you leave the track, so it can be rea
 without quitting the sim. Double-click to run.
 
 NeckFX is a Custom Shaders Patch feature and therefore exists in AC only; its
-block is hidden while ACC is running. Everything else is the same in both games.
+block is hidden while ACC is running, and also hidden by default in AC - toggle
+"Show NeckFX button" in the tray menu to reveal it (remembered in logger.cfg).
+Everything else is the same in both games.
 """
 
 import os
@@ -36,6 +38,7 @@ except Exception:
 
 APP_NAME = "StintLogger"        # window title: also the single-instance key
 APP_REG_NAME = "StintLogger"   # HKCU Run entry name
+APP_VERSION = "1.1.0"           # NeckFX OFF fix + tray toggle for the button
 
 def _writable(path):
     probe = os.path.join(path, ".stintlogger_write_test")
@@ -114,28 +117,56 @@ def fmt_ms(ms):
     return "{0:d}:{1:06.3f}".format(int(s) // 60, s - (int(s) // 60) * 60)
 
 
-def load_plan_minutes():
+def _load_cfg():
     try:
         with open(CFG_PATH, "r", encoding="utf-8") as fh:
-            v = int(json.load(fh).get("plan_minutes", DEFAULT_PLAN_MIN))
+            d = json.load(fh)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_cfg(updates):
+    # read-modify-write on the whole file: a plain json.dump(updates) would
+    # silently drop every other setting logger.cfg holds
+    d = _load_cfg()
+    d.update(updates)
+    try:
+        with open(CFG_PATH, "w", encoding="utf-8") as fh:
+            json.dump(d, fh)
+    except Exception:
+        pass
+
+
+def load_plan_minutes():
+    try:
+        v = int(_load_cfg().get("plan_minutes", DEFAULT_PLAN_MIN))
         return v if 1 <= v <= 600 else DEFAULT_PLAN_MIN
     except Exception:
         return DEFAULT_PLAN_MIN
 
 
 def save_plan_minutes(v):
-    try:
-        with open(CFG_PATH, "w", encoding="utf-8") as fh:
-            json.dump({"plan_minutes": v}, fh)
-    except Exception:
-        pass
+    _save_cfg({"plan_minutes": v})
+
+
+def load_neckfx_visible():
+    return bool(_load_cfg().get("neckfx_visible", False))
+
+
+def save_neckfx_visible(v):
+    _save_cfg({"neckfx_visible": bool(v)})
 
 
 # ---- NeckFX preset switching (edits assettocorsa/extension/config/neck.ini) ----
 NECKFX_PRESETS = {
     "OFF": {
         ("BASIC", "ENABLED"): "0",  # takes full effect on session reload
-        # zero the movement so it also goes neutral live (ENABLED flag isn't hot-reloaded)
+        # zero the movement so it also goes neutral live (ENABLED flag isn't hot-reloaded);
+        # SCRIPT must go off too, or its cockpit-camera script keeps driving the head
+        # and ignores ALIGNMENT_BASE entirely (neck.ini marks those keys "hidden with
+        # SCRIPT/ENABLED") - this is why OFF used to look applied but not turn anything off
+        ("SCRIPT", "ENABLED"): "0",
         ("ALIGNMENT_BASE", "ALIGN_WITH_VELOCITY"): "0.0",
         ("ALIGNMENT_BASE", "ALIGN_WITH_STEERING"): "0.0",
         ("ALIGNMENT_BASE", "HORIZON_LOCK"): "0.0",
@@ -372,6 +403,7 @@ class App:
         self.last_fuel = None       # last seen telemetry, kept so the fuel block can
         self.last_session_ms = None # be repainted while parked (e.g. plan edited)
         self.neck_mode = read_neck_mode(NECK_INI)
+        self.neckfx_visible = load_neckfx_visible()
         self.tray = None
         self._build()
         self._setup_tray()
@@ -509,7 +541,7 @@ class App:
         self.neck_btn.pack()
         self.neckhint = self._lab(self.neckwrap, "", fg=MUTED, font=("Segoe UI", 8))
         self.neckhint.pack()
-        self.neckwrap.pack(pady=(12, 0))
+        # not packed here: _apply_game() decides on first call, from neckfx_visible + game
 
         self.btns.pack(pady=12)
         tk.Button(self.btns, text="Open folder", command=lambda: os.startfile(OUT_DIR),
@@ -571,10 +603,7 @@ class App:
         self.last_fuel = None       # tank level is meaningless with no sim attached
         self.last_session_ms = None
         self.title_lab.config(text="ACC LOGGER" if game == ACC else "ASSETTO CORSA LOGGER")
-        if game == ACC:
-            self.neckwrap.pack_forget()
-        else:
-            self.neckwrap.pack(pady=(12, 0), before=self.btns)
+        self._update_neck_visibility()
         self._refresh_laps()
         self._paint_fuel()
         self._fit()
@@ -839,6 +868,23 @@ class App:
         self.status.config(text=text, fg=color)
 
     # ---------- NeckFX ----------
+    def _update_neck_visibility(self):
+        if self.neckfx_visible and self.game != ACC:
+            self.neckwrap.pack(pady=(12, 0), before=self.btns)
+        else:
+            self.neckwrap.pack_forget()
+
+    def _set_neckfx_visible(self, v):
+        self.neckfx_visible = v
+        save_neckfx_visible(v)
+        self._update_neck_visibility()
+        self._fit()
+        if self.tray is not None:
+            try:
+                self.tray.update_menu()
+            except Exception:
+                pass
+
     def _paint_neck(self):
         colors = {"OFF": GREY, "DRIFT": BLUE, "GRIP": GREEN}
         self.neck_btn.config(text="NeckFX: " + self.neck_mode, fg=colors.get(self.neck_mode, TEXT))
@@ -897,12 +943,15 @@ class App:
             # useful, so this stays enabled unless ACC is the running sim.
             pystray.MenuItem(lambda it: "NeckFX: " + self.neck_mode, neck_menu,
                              enabled=lambda it: self.game != ACC),
+            pystray.MenuItem("Show NeckFX button", lambda i, it: self._tray_toggle_neck_visible(),
+                             checked=lambda it: self.neckfx_visible),
             pystray.MenuItem("Run at startup", lambda i, it: self._tray_autostart(),
                              checked=lambda it: is_autostart()),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit", lambda i, it: self._tray_quit()),
         )
-        self.tray = pystray.Icon(APP_REG_NAME, self._tray_image(), APP_NAME, menu)
+        self.tray = pystray.Icon(APP_REG_NAME, self._tray_image(),
+                                 "{0} {1}".format(APP_NAME, APP_VERSION), menu)
         threading.Thread(target=self.tray.run, daemon=True).start()
 
     def _tray_show(self):
@@ -910,6 +959,9 @@ class App:
 
     def _tray_neck(self, mode):
         self.root.after(0, lambda: self._apply_neck(mode))
+
+    def _tray_toggle_neck_visible(self):
+        self.root.after(0, lambda: self._set_neckfx_visible(not self.neckfx_visible))
 
     def _tray_autostart(self):
         set_autostart(not is_autostart())

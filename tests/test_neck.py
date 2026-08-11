@@ -151,6 +151,24 @@ class TestPatching(NeckCase):
         self.assertNotIn(b"\n", raw.replace(b"\r\n", b""))
 
 
+class TestOffAlsoDisablesScript(NeckCase):
+    """SCRIPT/ENABLED gates ALIGNMENT_BASE entirely (neck.ini marks those keys
+    "hidden with SCRIPT/ENABLED"), so OFF must turn it off too - otherwise the
+    live zeroing of ALIGNMENT_BASE has no effect and the head keeps moving
+    under the script until the next session reload."""
+
+    def test_off_forces_script_disabled_from_a_script_driven_start(self):
+        write(self.ini, FULL_INI.replace("[SCRIPT]\nENABLED=0", "[SCRIPT]\nENABLED=1"))
+        stint_logger.patch_neck_ini(self.ini, "OFF")
+        got = stint_logger._read_keys(self.ini, {("SCRIPT", "ENABLED")})
+        self.assertEqual(got.get(("SCRIPT", "ENABLED")), "0")
+
+    def test_off_still_reads_back_as_off(self):
+        write(self.ini, FULL_INI.replace("[SCRIPT]\nENABLED=0", "[SCRIPT]\nENABLED=1"))
+        stint_logger.patch_neck_ini(self.ini, "OFF")
+        self.assertEqual(stint_logger.read_neck_mode(self.ini), "OFF")
+
+
 class TestBackupAndRestore(NeckCase):
 
     def test_backup_does_not_overwrite_an_existing_one(self):
