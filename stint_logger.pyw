@@ -1015,6 +1015,10 @@ def show_existing_window():
 
 
 def main():
+    if "--version" in sys.argv:
+        # the update gate runs exactly this on a downloaded build before trusting it
+        print("{0} {1}".format(APP_NAME, APP_VERSION))
+        return
     if not single_instance_ok():
         show_existing_window()
         return
