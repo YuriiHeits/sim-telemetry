@@ -14,3 +14,6 @@ StintLogger.exe
 
 # Per-user logger settings (fuel plan minutes)
 logger.cfg
+
+# Subagent-driven-development scratch (ledgers, briefs, review packages)
+.superpowers/
