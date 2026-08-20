@@ -3,9 +3,12 @@
 GUI, Python 3 + tkinter, stdlib only (pystray/PIL optional, for the tray icon).
 
 Detects which sim is running (Assetto Corsa or ACC) and logs a CSV per stint to
-this folder, with the column set that matches the game — see sim_shm.py. The CSV
-is FINALIZED (closed) on pit entry or when you leave the track, so it can be read
-without quitting the sim. Double-click to run.
+this folder, with the column set that matches the game — see sim_shm.py. One CSV
+per session type (practice/quali/race) — pit stops are recorded, not split out,
+except in RACE where a pit stop never force-closes the file. The CSV is FINALIZED
+(closed) on a session-type change, on leaving the sim, or after sitting AFK past
+the configured timeout, so it can be read without quitting the sim. Double-click
+to run.
 
 NeckFX is a Custom Shaders Patch feature and therefore exists in AC only; its
 block is hidden while ACC is running, and also hidden by default in AC - toggle
@@ -38,7 +41,7 @@ except Exception:
 
 APP_NAME = "StintLogger"        # window title: also the single-instance key
 APP_REG_NAME = "StintLogger"   # HKCU Run entry name
-APP_VERSION = "1.1.0"           # NeckFX OFF fix + tray toggle for the button
+APP_VERSION = "1.2.0"           # one file per session type, pit-aware AFK close
 
 def _writable(path):
     probe = os.path.join(path, ".stintlogger_write_test")
@@ -74,6 +77,8 @@ OUT_DIR = _out_dir()
 
 CFG_PATH = os.path.join(OUT_DIR, "logger.cfg")
 DEFAULT_PLAN_MIN = 30
+DEFAULT_AFK_S = 30          # stopped, not in pit
+DEFAULT_AFK_PIT_S = 600     # stopped, in pit (10 min - protects a real service)
 
 # ---- colors ----
 BG = "#14161b"
@@ -156,6 +161,43 @@ def load_neckfx_visible():
 
 def save_neckfx_visible(v):
     _save_cfg({"neckfx_visible": bool(v)})
+
+
+def load_afk_timeout():
+    """Seconds stopped and NOT in pit before the file closes."""
+    try:
+        v = int(_load_cfg().get("afk_timeout_s", DEFAULT_AFK_S))
+        return v if 1 <= v <= 3600 else DEFAULT_AFK_S
+    except Exception:
+        return DEFAULT_AFK_S
+
+
+def save_afk_timeout(v):
+    _save_cfg({"afk_timeout_s": v})
+
+
+def load_afk_pit_timeout():
+    """Seconds stopped WHILE in pit before the file closes - long, so a real
+    service (fuel + tyres + heavy repair) never gets cut off mid-stop."""
+    try:
+        v = int(_load_cfg().get("afk_pit_timeout_s", DEFAULT_AFK_PIT_S))
+        return v if 1 <= v <= 7200 else DEFAULT_AFK_PIT_S
+    except Exception:
+        return DEFAULT_AFK_PIT_S
+
+
+def save_afk_pit_timeout(v):
+    _save_cfg({"afk_pit_timeout_s": v})
+
+
+def load_close_on_pit_practice():
+    """PRACTICE/QUALI only: restore the old one-file-per-pit-visit behavior.
+    RACE ignores this - a race pit stop never force-closes the file."""
+    return bool(_load_cfg().get("close_on_pit_practice", False))
+
+
+def save_close_on_pit_practice(v):
+    _save_cfg({"close_on_pit_practice": bool(v)})
 
 
 # ---- NeckFX preset switching (edits assettocorsa/extension/config/neck.ini) ----
@@ -389,6 +431,7 @@ class App:
         self.reattach_t = 0.0
         self.game_check_t = 0.0
         self.session_key = None
+        self.session_tag = None     # sess_name(g.session): PRACTICE/QUALI/RACE/...
         self.lap_rows = []          # [(seq, lap_no, time_ms, max_kmh, valid, log_tag), ...]
         # The game restarts its lap counter on every stint, so it cannot identify a
         # lap within a session. `seq` can, and that is what the fuel model selects on.
@@ -528,6 +571,42 @@ class App:
                                   font=("Consolas", 11, "bold"))
         self.fuel_plan.grid(row=2, column=1, sticky="e", padx=8, pady=1)
 
+        self._lab(r, "RECORDING", fg=MUTED, font=("Segoe UI", 9)).pack(pady=(12, 2))
+        reccard = tk.Frame(r, bg=CARD)
+        reccard.pack(fill="x", padx=16)
+        afkwrap = tk.Frame(reccard, bg=CARD)
+        afkwrap.pack(fill="x", padx=8, pady=1)
+        self._lab(afkwrap, "AFK", fg=MUTED, font=("Segoe UI", 9), bg=CARD).pack(side="left")
+        self.afk_var = tk.StringVar(value=str(load_afk_timeout()))
+        self.afk_entry = tk.Entry(afkwrap, textvariable=self.afk_var, width=4,
+                                  justify="center", bg=BG, fg=TEXT,
+                                  insertbackground=TEXT, relief="flat",
+                                  font=("Consolas", 10))
+        self.afk_entry.pack(side="left", padx=4)
+        self.afk_entry.bind("<Return>", lambda e: self._save_afk())
+        self.afk_entry.bind("<FocusOut>", lambda e: self._save_afk(defocus=False))
+        self._lab(afkwrap, "s on track", fg=MUTED, font=("Segoe UI", 9), bg=CARD).pack(side="left")
+
+        pitafkwrap = tk.Frame(reccard, bg=CARD)
+        pitafkwrap.pack(fill="x", padx=8, pady=1)
+        self._lab(pitafkwrap, "AFK", fg=MUTED, font=("Segoe UI", 9), bg=CARD).pack(side="left")
+        self.afk_pit_var = tk.StringVar(value=str(load_afk_pit_timeout() // 60))
+        self.afk_pit_entry = tk.Entry(pitafkwrap, textvariable=self.afk_pit_var, width=4,
+                                      justify="center", bg=BG, fg=TEXT,
+                                      insertbackground=TEXT, relief="flat",
+                                      font=("Consolas", 10))
+        self.afk_pit_entry.pack(side="left", padx=4)
+        self.afk_pit_entry.bind("<Return>", lambda e: self._save_afk_pit())
+        self.afk_pit_entry.bind("<FocusOut>", lambda e: self._save_afk_pit(defocus=False))
+        self._lab(pitafkwrap, "min in pit", fg=MUTED, font=("Segoe UI", 9), bg=CARD).pack(side="left")
+
+        self.close_on_pit_var = tk.BooleanVar(value=load_close_on_pit_practice())
+        tk.Checkbutton(reccard, text="close file on pit entry (practice/quali only)",
+                       variable=self.close_on_pit_var, command=self._save_close_on_pit,
+                       bg=CARD, fg=MUTED, selectcolor=BG, activebackground=CARD,
+                       activeforeground=TEXT, relief="flat", anchor="w",
+                       font=("Segoe UI", 9)).pack(fill="x", padx=6, pady=(2, 4))
+
         self.filelbl = self._lab(r, "file: -", fg=MUTED, font=("Consolas", 9))
         self.filelbl.pack(pady=(12, 0))
         self.savedlbl = self._lab(r, "saved: -", fg=MUTED, font=("Consolas", 9))
@@ -560,7 +639,7 @@ class App:
         self.root.geometry("330x{0}".format(self.root.winfo_reqheight()))
 
     def _click_defocus(self, event):
-        if event.widget is not self.plan_entry:
+        if event.widget not in (self.plan_entry, self.afk_entry, self.afk_pit_entry):
             self.root.focus_set()
 
     def _save_plan(self, defocus=True):
@@ -582,6 +661,43 @@ class App:
             return min(600, max(1, int(self.plan_var.get())))
         except Exception:
             return DEFAULT_PLAN_MIN
+
+    def _save_afk(self, defocus=True):
+        try:
+            v = int(self.afk_var.get())
+        except Exception:
+            v = DEFAULT_AFK_S
+        v = min(3600, max(1, v))
+        self.afk_var.set(str(v))
+        save_afk_timeout(v)
+        if defocus:
+            self.root.focus_set()
+
+    def _afk_seconds(self):
+        try:
+            return min(3600, max(1, int(self.afk_var.get())))
+        except Exception:
+            return DEFAULT_AFK_S
+
+    def _save_afk_pit(self, defocus=True):
+        try:
+            v_min = int(self.afk_pit_var.get())
+        except Exception:
+            v_min = DEFAULT_AFK_PIT_S // 60
+        v_min = min(120, max(1, v_min))
+        self.afk_pit_var.set(str(v_min))
+        save_afk_pit_timeout(v_min * 60)
+        if defocus:
+            self.root.focus_set()
+
+    def _afk_pit_seconds(self):
+        try:
+            return min(7200, max(60, int(self.afk_pit_var.get()) * 60))
+        except Exception:
+            return DEFAULT_AFK_PIT_S
+
+    def _save_close_on_pit(self):
+        save_close_on_pit_practice(self.close_on_pit_var.get())
 
     # ---------- game switching ----------
     def _apply_game(self, game):
@@ -631,8 +747,9 @@ class App:
         self.w.writerow(self.reader.cols)
         self.rows = 0
         self.t0 = time.perf_counter()
-        # lap_rows is NOT cleared here: a new file starts on every pit stop, and the
-        # laps you drove before the stop are still part of this session
+        # lap_rows is NOT cleared here: a file can now reopen after an AFK close
+        # (or, in PRACTICE/QUALI with the pit toggle on, after a pit stop) and the
+        # laps you drove before that are still part of this session
         self.prev_completed = -1
         self.cur_max = 0.0
         self.lap_had_pit = False
@@ -674,13 +791,19 @@ class App:
             return
 
         p, g, s = r.phys, r.graph, r.stat
-        # A session is one track + car + day — the same thing the output folder is,
-        # so the window and the disk never disagree about where a session begins.
+        # A session is one track + car + day + session type (practice/quali/race) —
+        # the same thing the output folder + file tag is, so the window and the disk
+        # never disagree about where a session begins. Session type is included so a
+        # file can never straddle two session types: lap counters reset between them,
+        # and mixing them would corrupt every per-lap analysis downstream.
+        tag = sim_shm.sess_name(g.session)
+        self.session_tag = tag
         key = ((s.carModel or "").strip(), (s.track or "").strip(),
-               time.strftime("%Y-%m-%d"))
+               time.strftime("%Y-%m-%d"), tag)
         if key != self.session_key:
             self.session_key = key
-            self.fuel.reset()      # new car, track or day: the history means nothing
+            self._close()           # never straddle a session-type boundary
+            self.fuel.reset()      # new car, track, day or session type: history means nothing
             self.lap_rows = []
             self.lap_seq = 0
             self.prev_completed = -1
@@ -694,11 +817,16 @@ class App:
         if r.lap_invalid_now():
             self.lap_invalid = True   # latched until the lap is recorded
 
-        if in_pit and not self.prev_pit:
+        # RACE never force-closes on pit entry - a stop there can legitimately run
+        # long (fuel + tyres + heavy repair) and losing it mid-service is worse than
+        # a slightly bigger file. PRACTICE/QUALI keep the old per-stint-file behavior
+        # only if the driver explicitly opted back into it.
+        if (in_pit and not self.prev_pit and self.session_tag != "RACE"
+                and self.close_on_pit_var.get()):
             self._close()
         self.prev_pit = in_pit
 
-        if r.live() and not in_pit:
+        if r.live():
             moving = p.speedKmh >= 5.0
             if moving:
                 self.stopped = 0.0
@@ -706,22 +834,24 @@ class App:
                     self._open()
             else:
                 self.stopped += 0.02
-                if self.f is not None and self.stopped > 3.0:
-                    self._close()  # parked / return-to-garage -> finalize
+                # Stopped IN pit gets the long timeout (protects a real service);
+                # stopped anywhere else (garage, off track, AC drift pad with no
+                # pit box at all) gets the short one.
+                timeout = self._afk_pit_seconds() if in_pit else self._afk_seconds()
+                if self.f is not None and self.stopped > timeout:
+                    self._close()  # genuinely abandoned, not mid-service
             if self.f is not None:
                 self._write(p, g)
-                self._set_status("●  REC", GREEN)
+                self._set_status("●  REC (PIT)" if in_pit else "●  REC",
+                                 AMBER if in_pit else GREEN)
             elif self.last_saved != "-":
                 self._set_status("■  PARKED - saved", AMBER)
             else:
                 self._set_status("○  READY (drive to start)", GREY)
             self._update_live(p, g)
-        elif in_pit:
-            self._close()
-            self._set_status("■  PIT - saved", AMBER)
         else:
             self._close()
-            self._set_status("○  IDLE", GREY)
+            self._set_status("■  PIT - saved" if in_pit else "○  IDLE", AMBER if in_pit else GREY)
 
         self.root.after(20, self.poll)
 
@@ -770,8 +900,9 @@ class App:
             return
         prev_tag = None
         for seq, ln, t, spd, valid, tag in self.lap_rows:
-            # one separator per log: a session spans several files (every pit stop
-            # starts a new one) and the game restarts its lap numbers with each
+            # one separator per log: a session can still span several files (AFK
+            # close, or a pit stop in PRACTICE/QUALI with the toggle on) and the
+            # game restarts its lap numbers with each
             if tag != prev_tag:
                 prev_tag = tag
                 i = self.lap_list.size()
