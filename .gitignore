@@ -11,6 +11,8 @@ __pycache__/
 
 # Built binary — rebuild from stint_logger.pyw via PyInstaller (see README)
 StintLogger.exe
+StintLogger.previous.exe
+_telemetry_build/
 
 # Per-user logger settings (fuel plan minutes)
 logger.cfg

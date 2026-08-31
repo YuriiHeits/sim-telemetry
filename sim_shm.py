@@ -252,6 +252,9 @@ CORE_COLS = ["t", "lap", "pos", "speed_kmh", "rpm", "gear", "gas", "brake", "clu
              "gx", "gy", "gz", "slip_fl", "slip_fr", "slip_rl", "slip_rr",
              "press_fl", "press_fr", "press_rl", "press_rr",
              "ttemp_fl", "ttemp_fr", "ttemp_rl", "ttemp_rr",
+             "wear_fl", "wear_fr", "wear_rl", "wear_rr",
+             "btemp_fl", "btemp_fr", "btemp_rl", "btemp_rr",
+             "air_temp", "road_temp", "tyre_compound",
              "susp_fl", "susp_fr", "susp_rl", "susp_rr",
              "tc", "abs", "fuel", "inpit", "last_ms", "best_ms", "session", "race_pos",
              "heading", "vel_x", "vel_y", "vel_z"]
@@ -262,8 +265,7 @@ AC_EXTRA_COLS = ["camber_fl", "camber_fr", "camber_rl", "camber_rr",
 # No in_pitlane column on purpose: the file is finalized the moment the pit lane
 # is entered, so no row with in_pitlane=1 can ever be written. Confirmed on a live
 # session before it was dropped.
-ACC_EXTRA_COLS = ["btemp_fl", "btemp_fr", "btemp_rl", "btemp_rr",
-                  "ideal_line", "valid_lap", "fuel_x_lap", "fuel_est_laps"]
+ACC_EXTRA_COLS = ["ideal_line", "valid_lap", "fuel_x_lap", "fuel_est_laps"]
 
 
 def cols_for(game):
@@ -356,6 +358,9 @@ class SimReader:
         out += _f4(p.wheelSlip)
         out += _f4(p.wheelsPressure, 2)
         out += _f4(p.tyreCoreTemperature, 1)
+        out += _f4(p.tyreWear, 3)
+        out += _f4(p.brakeTemp, 1)
+        out += [_f(p.airTemp, 1), _f(p.roadTemp, 1), g.tyreCompound]
         out += _f4(p.suspensionTravel, 4)
         out += [_f(p.tc, 2), _f(p.abs, 2), _f(p.fuel, 2), g.isInPit,
                 g.iLastTime, g.iBestTime, sess_name(g.session), g.position,
@@ -366,7 +371,6 @@ class SimReader:
             out += _f4(p.tyreDirtyLevel)
             out += [p.numberOfTyresOut, _f(p.drs, 2)]
         else:
-            out += _f4(p.brakeTemp, 1)
             out += [g.idealLineOn, g.isValidLap,
                     _f(g.fuelXLap, 3), _f(g.fuelEstimatedLaps, 2)]
         return out

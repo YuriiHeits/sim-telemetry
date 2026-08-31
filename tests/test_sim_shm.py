@@ -54,8 +54,14 @@ class TestColumns(unittest.TestCase):
 
     def test_acc_only_columns_absent_in_ac(self):
         ac = sim_shm.cols_for(AC)
-        for col in ("btemp_fl", "valid_lap", "fuel_x_lap", "fuel_est_laps"):
+        for col in ("valid_lap", "fuel_x_lap", "fuel_est_laps"):
             self.assertNotIn(col, ac)
+
+    def test_tyre_setup_channels_are_shared(self):
+        for game in (AC, ACC):
+            cols = sim_shm.cols_for(game)
+            for col in ("wear_fl", "btemp_fl", "air_temp", "road_temp", "tyre_compound"):
+                self.assertIn(col, cols, (game, col))
 
     def test_no_pitlane_column(self):
         # it could only ever be 0: entering the pit lane finalizes the file
