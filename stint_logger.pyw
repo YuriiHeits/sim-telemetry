@@ -41,7 +41,7 @@ except Exception:
 
 APP_NAME = "StintLogger"        # window title: also the single-instance key
 APP_REG_NAME = "StintLogger"   # HKCU Run entry name
-APP_VERSION = "1.2.1"           # one file per session type, pit-aware AFK close
+APP_VERSION = "1.2.2"           # one file per session type, pit-aware AFK close
 
 def _writable(path):
     probe = os.path.join(path, ".stintlogger_write_test")
