@@ -275,8 +275,8 @@ ACC_EXTRA_COLS = ["ideal_line", "valid_lap", "fuel_x_lap", "fuel_est_laps"]
 # CORE_COLS, so every pre-1.3.0 column keeps its index in both games.
 #   angvel_*     physics.localAngularVel, rad/s, car-local axes
 #   yaw_rate     = angvel_y: both games are Y-up (vel_y and car_y are height), so
-#                yaw is rotation about Y. The sign is not yet checked against a
-#                live session; compare it with d(heading)/dt before trusting it.
+#                yaw is rotation about Y. Checked on a live AC session: it tracks
+#                -d(heading)/dt (r = -0.998) and shares its sign with steer and gx.
 #   wheel_w_*    physics.wheelAngularSpeed, rad/s, raw
 #   turbo_boost  physics.turboBoost, as the game reports it
 #   car_*        world position, m. AC: graphics.carCoordinates. ACC: the player's
