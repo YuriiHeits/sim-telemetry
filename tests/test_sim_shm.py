@@ -141,6 +141,7 @@ class TestStructLayout(unittest.TestCase):
             reader = sim_shm.SimReader(game)
             reader.phys = reader._phys_t()
             reader.graph = reader._graph_t()
+            reader.stat = sim_shm.Static()
             self.assertEqual(len(reader.row(1.0)), len(reader.cols), game)
 
 
@@ -156,6 +157,7 @@ class TestDriftChannels(unittest.TestCase):
         reader = sim_shm.SimReader(game)
         reader.phys = reader._phys_t()
         reader.graph = reader._graph_t()
+        reader.stat = sim_shm.Static()
         p = reader.phys
         p.localAngularVel[0], p.localAngularVel[1], p.localAngularVel[2] = 0.1, -0.75, 0.2
         for i, w in enumerate((101.0, 102.0, 150.0, 152.0)):
@@ -172,7 +174,6 @@ class TestDriftChannels(unittest.TestCase):
         for game in (AC, ACC):
             cols = sim_shm.cols_for(game)
             self.assertEqual(cols[:len(old[game])], old[game], game)
-            self.assertEqual(cols[len(old[game]):], self.NEW, game)
 
     def test_physics_channels_land_in_their_columns(self):
         for game in (AC, ACC):
@@ -219,6 +220,14 @@ class TestDriftChannels(unittest.TestCase):
         row = self._by_name(reader)
         self.assertEqual((row["car_x"], row["car_y"], row["car_z"]), ("", "", ""))
 
+    def test_drift_columns_keep_their_1_3_0_place(self):
+        n = len(self.NEW)
+        old = {AC: sim_shm.CORE_COLS + sim_shm.AC_EXTRA_COLS,
+               ACC: sim_shm.CORE_COLS + sim_shm.ACC_EXTRA_COLS}
+        for game in (AC, ACC):
+            self.assertEqual(sim_shm.cols_for(game)[len(old[game]):len(old[game]) + n],
+                             self.NEW, game)
+
     def test_acc_position_survives_a_garbage_active_cars(self):
         reader = self._reader(ACC)
         g = reader.graph
@@ -226,6 +235,105 @@ class TestDriftChannels(unittest.TestCase):
         g.playerCarID = 42
         row = self._by_name(reader)
         self.assertEqual(row["car_x"], "")
+
+
+class TestSetupChannels(unittest.TestCase):
+    """1.4.0: tyre forces, slip, local velocity, temperatures across the tread,
+    aid activity and car constants, appended after the 1.3.0 drift columns."""
+
+    SHARED = ["slip_ang_fl", "slip_ang_fr", "slip_ang_rl", "slip_ang_rr",
+              "slip_ratio_fl", "slip_ratio_fr", "slip_ratio_rl", "slip_ratio_rr",
+              "lvel_x", "lvel_y", "lvel_z", "final_ff", "brake_bias", "max_rpm"]
+
+    def _reader(self, game):
+        reader = sim_shm.SimReader(game)
+        reader.phys = reader._phys_t()
+        reader.graph = reader._graph_t()
+        reader.stat = sim_shm.Static()
+        p, s = reader.phys, reader.stat
+        for i in range(4):
+            p.slipAngle[i] = 0.1 * (i + 1)
+            p.slipRatio[i] = -0.05 * (i + 1)
+            p.wheelLoad[i] = 3000.0 + i
+            p.fx[i], p.fy[i], p.mz[i] = 100.0 + i, -200.0 - i, 5.0 + i
+            p.tyreTempI[i], p.tyreTempM[i], p.tyreTempO[i] = 80.0 + i, 75.0 + i, 70.0 + i
+            s.tyreRadius[i] = 0.30 + 0.01 * i
+            s.suspensionMaxTravel[i] = 0.10 + 0.01 * i
+        p.localVelocity[0], p.localVelocity[1], p.localVelocity[2] = -3.5, 0.25, 22.0
+        p.finalFF, p.brakeBias = 0.875, 0.56
+        p.tcinAction, p.absInAction = 1, 0
+        p.rideHeight[0], p.rideHeight[1] = 0.055, 0.07
+        s.maxRpm, s.maxTurboBoost = 8000, 1.2
+        return reader
+
+    def _by_name(self, reader):
+        return dict(zip(reader.cols, reader.row(1.0)))
+
+    def test_columns_follow_the_drift_block(self):
+        for game in (AC, ACC):
+            cols = sim_shm.cols_for(game)
+            start = cols.index("car_z") + 1
+            tail = self.SHARED + (sim_shm.AC_SETUP_COLS if game == AC else [])
+            self.assertEqual(cols[start:], tail, game)
+
+    def test_ac_only_setup_columns_absent_in_acc(self):
+        acc = sim_shm.cols_for(ACC)
+        for col in ("load_fl", "fy_fl", "ttemp_i_fl", "tc_active", "max_turbo",
+                    "tyre_r_fl", "susp_max_fl", "ride_h_f"):
+            self.assertNotIn(col, acc)
+
+    def test_no_duplicate_columns(self):
+        for game in (AC, ACC):
+            cols = sim_shm.cols_for(game)
+            self.assertEqual(len(cols), len(set(cols)), game)
+
+    def test_row_length_matches_column_count(self):
+        for game in (AC, ACC):
+            reader = self._reader(game)
+            self.assertEqual(len(reader.row(1.0)), len(reader.cols), game)
+
+    def test_shared_channels_land_in_their_columns(self):
+        for game in (AC, ACC):
+            row = self._by_name(self._reader(game))
+            self.assertEqual([row["slip_ang_" + w] for w in ("fl", "fr", "rl", "rr")],
+                             ["0.1000", "0.2000", "0.3000", "0.4000"], game)
+            self.assertEqual(row["slip_ratio_rr"], "-0.2000", game)
+            self.assertEqual((row["lvel_x"], row["lvel_y"], row["lvel_z"]),
+                             ("-3.5000", "0.2500", "22.0000"), game)
+            self.assertEqual(row["final_ff"], "0.875", game)
+            self.assertEqual(row["brake_bias"], "0.560", game)
+            self.assertEqual(row["max_rpm"], 8000, game)
+
+    def test_ac_channels_land_in_their_columns(self):
+        row = self._by_name(self._reader(AC))
+        self.assertEqual(row["load_fr"], "3001.0")
+        self.assertEqual((row["fx_rl"], row["fy_rl"], row["mz_rl"]),
+                         ("102.0", "-202.0", "7.00"))
+        self.assertEqual((row["ttemp_i_rr"], row["ttemp_m_rr"], row["ttemp_o_rr"]),
+                         ("83.0", "78.0", "73.0"))
+        self.assertEqual((row["tc_active"], row["abs_active"]), (1, 0))
+        self.assertEqual((row["ride_h_f"], row["ride_h_r"]), ("0.0550", "0.0700"))
+        self.assertEqual(row["max_turbo"], "1.200")
+        self.assertEqual(row["tyre_r_rr"], "0.3300")
+        self.assertEqual(row["susp_max_fl"], "0.1000")
+
+    def test_physics_tail_offsets(self):
+        # counted by hand from the Kunos layout after clutch; a missing or
+        # mis-sized field anywhere in between shifts slipAngle
+        for t in (sim_shm.ACPhysics, sim_shm.ACCPhysics):
+            clutch = t.clutch.offset
+            self.assertEqual(t.tyreTempI.offset, clutch + 4)
+            self.assertEqual(t.brakeBias.offset, clutch + 4 + 48 + 4 + 144)
+            self.assertEqual(t.localVelocity.offset, clutch + 204)
+            self.assertEqual(t.mz.offset, clutch + 228)
+            self.assertEqual(t.slipAngle.offset, clutch + 292)
+            self.assertEqual(t.absInAction.offset, clutch + 312)
+
+    def test_static_offsets(self):
+        s = sim_shm.Static
+        self.assertEqual(s.maxRpm.offset, s.sectorCount.offset + 12)
+        self.assertEqual(s.tyreRadius.offset, s.sectorCount.offset + 36)
+        self.assertEqual(s.maxTurboBoost.offset, s.sectorCount.offset + 52)
 
 
 if __name__ == "__main__":

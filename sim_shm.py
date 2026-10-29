@@ -99,6 +99,24 @@ def detect_game():
 
 # -------------------------------------------------------------------- structures
 
+# Fields after clutch, identical in both games (Kunos layout, cross-checked
+# against PyAccSharedMemory). ACC leaves the tread temperatures, tyre forces and
+# aid flags empty, so those are only logged for AC.
+_PHYS_TAIL = [
+    ("tyreTempI", ctypes.c_float * 4), ("tyreTempM", ctypes.c_float * 4),
+    ("tyreTempO", ctypes.c_float * 4), ("isAIControlled", ctypes.c_int32),
+    ("tyreContactPoint", (ctypes.c_float * 3) * 4),
+    ("tyreContactNormal", (ctypes.c_float * 3) * 4),
+    ("tyreContactHeading", (ctypes.c_float * 3) * 4),
+    ("brakeBias", ctypes.c_float), ("localVelocity", ctypes.c_float * 3),
+    ("P2PActivations", ctypes.c_int32), ("P2PStatus", ctypes.c_int32),
+    ("currentMaxRpm", ctypes.c_int32),
+    ("mz", ctypes.c_float * 4), ("fx", ctypes.c_float * 4), ("fy", ctypes.c_float * 4),
+    ("slipRatio", ctypes.c_float * 4), ("slipAngle", ctypes.c_float * 4),
+    ("tcinAction", ctypes.c_int32), ("absInAction", ctypes.c_int32),
+]
+
+
 class ACPhysics(ctypes.Structure):
     _pack_ = 4
     _fields_ = [
@@ -129,11 +147,12 @@ class ACPhysics(ctypes.Structure):
         ("brakeTemp", ctypes.c_float * 4),
         # --- wanted ---
         ("clutch", ctypes.c_float),
-    ]
+    ] + _PHYS_TAIL
 
 
 class ACCPhysics(ctypes.Structure):
-    """Identical to AC up to clutch; declared further only to reach brakeTemp.
+    """Identical to AC; declared field by field because the ACC docs mark which
+    fields the game leaves empty.
 
     drs is an int here (AC declares it float) — same 4 bytes, so nothing shifts.
     """
@@ -173,7 +192,7 @@ class ACCPhysics(ctypes.Structure):
         # --- wanted ---
         ("brakeTemp", ctypes.c_float * 4),
         ("clutch", ctypes.c_float),
-    ]
+    ] + _PHYS_TAIL
 
 
 class ACGraphics(ctypes.Structure):
@@ -239,7 +258,8 @@ class ACCGraphics(ctypes.Structure):
 
 
 class Static(ctypes.Structure):
-    """Prefix is identical in both games and the logger only reads carModel/track."""
+    """Prefix is identical in both games. ACC leaves maxTorque, maxPower,
+    suspensionMaxTravel, tyreRadius and maxTurboBoost empty."""
     _pack_ = 4
     _fields_ = [
         ("smVersion", ctypes.c_wchar * 15), ("acVersion", ctypes.c_wchar * 15),
@@ -247,6 +267,10 @@ class Static(ctypes.Structure):
         ("carModel", ctypes.c_wchar * 33), ("track", ctypes.c_wchar * 33),
         ("playerName", ctypes.c_wchar * 33), ("playerSurname", ctypes.c_wchar * 33),
         ("playerNick", ctypes.c_wchar * 33), ("sectorCount", ctypes.c_int32),
+        ("maxTorque", ctypes.c_float), ("maxPower", ctypes.c_float),
+        ("maxRpm", ctypes.c_int32), ("maxFuel", ctypes.c_float),
+        ("suspensionMaxTravel", ctypes.c_float * 4), ("tyreRadius", ctypes.c_float * 4),
+        ("maxTurboBoost", ctypes.c_float),
     ]
 
 
@@ -287,8 +311,40 @@ DRIFT_COLS = ["angvel_x", "angvel_y", "angvel_z", "yaw_rate",
               "turbo_boost", "car_x", "car_y", "car_z"]
 
 
+# Added in 1.4.0, after DRIFT_COLS, for drift and circuit setup work.
+#   slip_ang_*   physics.slipAngle per tyre, as the game reports it (docs: rad)
+#   slip_ratio_* physics.slipRatio per tyre
+#   lvel_*       physics.localVelocity, m/s, car-local axes
+#   final_ff     physics.finalFF, force feedback after the game's gain
+#   brake_bias   physics.brakeBias, front share
+#   max_rpm      static.maxRpm
+SETUP_COLS = ["slip_ang_fl", "slip_ang_fr", "slip_ang_rl", "slip_ang_rr",
+              "slip_ratio_fl", "slip_ratio_fr", "slip_ratio_rl", "slip_ratio_rr",
+              "lvel_x", "lvel_y", "lvel_z", "final_ff", "brake_bias", "max_rpm"]
+
+# AC only, last: ACC does not fill these.
+#   load_*       physics.wheelLoad, N
+#   fx_*, fy_*   physics.fx / fy, longitudinal and lateral tyre force, N
+#   mz_*         physics.mz, self-aligning torque, Nm
+#   ttemp_i/m/o_* physics.tyreTempI/M/O, inner / middle / outer tread, C
+#   tc_active, abs_active  physics.tcinAction / absInAction, 0/1
+#   ride_h_f/r   physics.rideHeight, m
+#   max_turbo    static.maxTurboBoost, same units as turbo_boost
+#   tyre_r_*     static.tyreRadius, m
+#   susp_max_*   static.suspensionMaxTravel, m (compare with susp_*)
+_W = ("fl", "fr", "rl", "rr")
+AC_SETUP_COLS = (["load_" + w for w in _W] + ["fx_" + w for w in _W]
+                 + ["fy_" + w for w in _W] + ["mz_" + w for w in _W]
+                 + ["ttemp_i_" + w for w in _W] + ["ttemp_m_" + w for w in _W]
+                 + ["ttemp_o_" + w for w in _W]
+                 + ["tc_active", "abs_active", "ride_h_f", "ride_h_r", "max_turbo"]
+                 + ["tyre_r_" + w for w in _W] + ["susp_max_" + w for w in _W])
+
+
 def cols_for(game):
-    return CORE_COLS + (AC_EXTRA_COLS if game == AC else ACC_EXTRA_COLS) + DRIFT_COLS
+    if game == AC:
+        return CORE_COLS + AC_EXTRA_COLS + DRIFT_COLS + SETUP_COLS + AC_SETUP_COLS
+    return CORE_COLS + ACC_EXTRA_COLS + DRIFT_COLS + SETUP_COLS
 
 
 def _f(v, nd=3):
@@ -409,4 +465,16 @@ class SimReader:
         out += [_f(p.turboBoost, 3)]
         xyz = self.player_coords()
         out += [_f(v, 3) for v in xyz] if xyz is not None else ["", "", ""]
+        st, lv = self.stat, p.localVelocity
+        out += _f4(p.slipAngle, 4)
+        out += _f4(p.slipRatio, 4)
+        out += [_f(lv[0], 4), _f(lv[1], 4), _f(lv[2], 4),
+                _f(p.finalFF, 3), _f(p.brakeBias, 3), st.maxRpm]
+        if self.game == AC:
+            out += _f4(p.wheelLoad, 1)
+            out += _f4(p.fx, 1) + _f4(p.fy, 1) + _f4(p.mz, 2)
+            out += _f4(p.tyreTempI, 1) + _f4(p.tyreTempM, 1) + _f4(p.tyreTempO, 1)
+            out += [p.tcinAction, p.absInAction, _f(p.rideHeight[0], 4),
+                    _f(p.rideHeight[1], 4), _f(st.maxTurboBoost, 3)]
+            out += _f4(st.tyreRadius, 4) + _f4(st.suspensionMaxTravel, 4)
         return out
