@@ -25,6 +25,9 @@ STATUS_LIVE = 2
 # "wheels out permitted" and defaults to allowing two.
 WHEELS_OUT_FOR_CUT = 4
 
+# ACC publishes per-car arrays (carCoordinates, carID) sized for this many cars.
+ACC_MAX_CARS = 60
+
 # ACC first: if both are somehow running they fight over the same mapping names,
 # so the choice must at least be deterministic. ACC is the less likely of the two
 # to be sitting idle in the background.
@@ -206,7 +209,8 @@ class ACCGraphics(ctypes.Structure):
         ("tyreCompound", ctypes.c_wchar * 33), ("replayTimeMultiplier", ctypes.c_float),
         ("normalizedCarPosition", ctypes.c_float),
         ("activeCars", ctypes.c_int32),
-        ("carCoordinates", ctypes.c_float * (60 * 3)), ("carID", ctypes.c_int32 * 60),
+        ("carCoordinates", ctypes.c_float * (ACC_MAX_CARS * 3)),
+        ("carID", ctypes.c_int32 * ACC_MAX_CARS),
         ("playerCarID", ctypes.c_int32), ("penaltyTime", ctypes.c_float),
         ("flag", ctypes.c_int32), ("penalty", ctypes.c_int32),
         # --- wanted ---
@@ -267,9 +271,24 @@ AC_EXTRA_COLS = ["camber_fl", "camber_fr", "camber_rl", "camber_rr",
 # session before it was dropped.
 ACC_EXTRA_COLS = ["ideal_line", "valid_lap", "fuel_x_lap", "fuel_est_laps"]
 
+# Added in 1.3.0 for drift analysis. Appended after the game extras, not to
+# CORE_COLS, so every pre-1.3.0 column keeps its index in both games.
+#   angvel_*     physics.localAngularVel, rad/s, car-local axes
+#   yaw_rate     = angvel_y: both games are Y-up (vel_y and car_y are height), so
+#                yaw is rotation about Y. The sign is not yet checked against a
+#                live session; compare it with d(heading)/dt before trusting it.
+#   wheel_w_*    physics.wheelAngularSpeed, rad/s, raw
+#   turbo_boost  physics.turboBoost, as the game reports it
+#   car_*        world position, m. AC: graphics.carCoordinates. ACC: the player's
+#                slot in carCoordinates[60] (carID[i] == playerCarID); blank when
+#                the player is not among the active cars.
+DRIFT_COLS = ["angvel_x", "angvel_y", "angvel_z", "yaw_rate",
+              "wheel_w_fl", "wheel_w_fr", "wheel_w_rl", "wheel_w_rr",
+              "turbo_boost", "car_x", "car_y", "car_z"]
+
 
 def cols_for(game):
-    return CORE_COLS + (AC_EXTRA_COLS if game == AC else ACC_EXTRA_COLS)
+    return CORE_COLS + (AC_EXTRA_COLS if game == AC else ACC_EXTRA_COLS) + DRIFT_COLS
 
 
 def _f(v, nd=3):
@@ -349,6 +368,17 @@ class SimReader:
             return self.phys.numberOfTyresOut >= WHEELS_OUT_FOR_CUT
         return self.graph.isValidLap == 0
 
+    def player_coords(self):
+        """World x, y, z of the player's car, or None when ACC does not list it."""
+        g = self.graph
+        if self.game == AC:
+            return g.carCoordinates
+        n = min(max(g.activeCars, 0), ACC_MAX_CARS)
+        for i in range(n):
+            if g.carID[i] == g.playerCarID:
+                return g.carCoordinates[i * 3:i * 3 + 3]
+        return None
+
     def row(self, t):
         p, g = self.phys, self.graph
         out = [_f(t, 3), g.completedLaps, _f(g.normalizedCarPosition, 5),
@@ -373,4 +403,10 @@ class SimReader:
         else:
             out += [g.idealLineOn, g.isValidLap,
                     _f(g.fuelXLap, 3), _f(g.fuelEstimatedLaps, 2)]
+        av = p.localAngularVel
+        out += [_f(av[0], 4), _f(av[1], 4), _f(av[2], 4), _f(av[1], 4)]
+        out += _f4(p.wheelAngularSpeed, 3)
+        out += [_f(p.turboBoost, 3)]
+        xyz = self.player_coords()
+        out += [_f(v, 3) for v in xyz] if xyz is not None else ["", "", ""]
         return out

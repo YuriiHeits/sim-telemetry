@@ -41,7 +41,7 @@ except Exception:
 
 APP_NAME = "StintLogger"        # window title: also the single-instance key
 APP_REG_NAME = "StintLogger"   # HKCU Run entry name
-APP_VERSION = "1.2.2"           # one file per session type, pit-aware AFK close
+APP_VERSION = "1.3.0"           # drift channels: yaw rate, wheel spin, boost, xyz
 
 def _writable(path):
     probe = os.path.join(path, ".stintlogger_write_test")

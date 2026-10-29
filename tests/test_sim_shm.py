@@ -83,7 +83,8 @@ class TestStructLayout(unittest.TestCase):
         for field in ("packetId", "gas", "brake", "fuel", "gear", "rpms", "steerAngle",
                       "speedKmh", "velocity", "accG", "wheelSlip", "wheelsPressure",
                       "tyreCoreTemperature", "suspensionTravel", "tc", "heading",
-                      "carDamage", "pitLimiterOn", "abs", "brakeTemp", "clutch"):
+                      "carDamage", "pitLimiterOn", "abs", "brakeTemp", "clutch",
+                      "wheelAngularSpeed", "turboBoost", "localAngularVel"):
             self.assertEqual(getattr(sim_shm.ACPhysics, field).offset,
                              getattr(sim_shm.ACCPhysics, field).offset, field)
         for field in ("packetId", "status", "session", "completedLaps", "position",
@@ -141,6 +142,90 @@ class TestStructLayout(unittest.TestCase):
             reader.phys = reader._phys_t()
             reader.graph = reader._graph_t()
             self.assertEqual(len(reader.row(1.0)), len(reader.cols), game)
+
+
+class TestDriftChannels(unittest.TestCase):
+    """yaw rate, per-wheel spin, boost and world position, appended after every
+    pre-1.3.0 column so old CSVs and index-based readers stay valid."""
+
+    NEW = ["angvel_x", "angvel_y", "angvel_z", "yaw_rate",
+           "wheel_w_fl", "wheel_w_fr", "wheel_w_rl", "wheel_w_rr",
+           "turbo_boost", "car_x", "car_y", "car_z"]
+
+    def _reader(self, game):
+        reader = sim_shm.SimReader(game)
+        reader.phys = reader._phys_t()
+        reader.graph = reader._graph_t()
+        p = reader.phys
+        p.localAngularVel[0], p.localAngularVel[1], p.localAngularVel[2] = 0.1, -0.75, 0.2
+        for i, w in enumerate((101.0, 102.0, 150.0, 152.0)):
+            p.wheelAngularSpeed[i] = w
+        p.turboBoost = 1.25
+        return reader
+
+    def _by_name(self, reader):
+        return dict(zip(reader.cols, reader.row(1.0)))
+
+    def test_new_columns_are_appended_after_the_old_ones(self):
+        old = {AC: sim_shm.CORE_COLS + sim_shm.AC_EXTRA_COLS,
+               ACC: sim_shm.CORE_COLS + sim_shm.ACC_EXTRA_COLS}
+        for game in (AC, ACC):
+            cols = sim_shm.cols_for(game)
+            self.assertEqual(cols[:len(old[game])], old[game], game)
+            self.assertEqual(cols[len(old[game]):], self.NEW, game)
+
+    def test_physics_channels_land_in_their_columns(self):
+        for game in (AC, ACC):
+            row = self._by_name(self._reader(game))
+            self.assertEqual(row["angvel_x"], "0.1000", game)
+            self.assertEqual(row["angvel_y"], "-0.7500", game)
+            self.assertEqual(row["angvel_z"], "0.2000", game)
+            # AC/ACC are Y-up (vel_y/car_y are height), so yaw is rotation about Y
+            self.assertEqual(row["yaw_rate"], row["angvel_y"], game)
+            self.assertEqual([row["wheel_w_" + w] for w in ("fl", "fr", "rl", "rr")],
+                             ["101.000", "102.000", "150.000", "152.000"], game)
+            self.assertEqual(row["turbo_boost"], "1.250", game)
+
+    def test_ac_position_comes_from_car_coordinates(self):
+        reader = self._reader(AC)
+        reader.graph.carCoordinates[0] = -123.5
+        reader.graph.carCoordinates[1] = 4.25
+        reader.graph.carCoordinates[2] = 987.75
+        row = self._by_name(reader)
+        self.assertEqual((row["car_x"], row["car_y"], row["car_z"]),
+                         ("-123.500", "4.250", "987.750"))
+
+    def test_acc_position_is_the_player_slot_not_slot_zero(self):
+        reader = self._reader(ACC)
+        g = reader.graph
+        g.activeCars = 3
+        g.carID[0], g.carID[1], g.carID[2] = 7, 42, 9
+        g.playerCarID = 42
+        for i in range(3):
+            g.carCoordinates[i * 3] = i * 100.0
+            g.carCoordinates[i * 3 + 1] = i + 0.5
+            g.carCoordinates[i * 3 + 2] = -i * 100.0
+        row = self._by_name(reader)
+        self.assertEqual((row["car_x"], row["car_y"], row["car_z"]),
+                         ("100.000", "1.500", "-100.000"))
+
+    def test_acc_position_is_blank_when_the_player_is_not_listed(self):
+        reader = self._reader(ACC)
+        g = reader.graph
+        g.activeCars = 2
+        g.carID[0], g.carID[1] = 7, 9
+        g.carID[5] = 42          # beyond activeCars: stale slot, must be ignored
+        g.playerCarID = 42
+        row = self._by_name(reader)
+        self.assertEqual((row["car_x"], row["car_y"], row["car_z"]), ("", "", ""))
+
+    def test_acc_position_survives_a_garbage_active_cars(self):
+        reader = self._reader(ACC)
+        g = reader.graph
+        g.activeCars = 1000      # must not index past the 60-car arrays
+        g.playerCarID = 42
+        row = self._by_name(reader)
+        self.assertEqual(row["car_x"], "")
 
 
 if __name__ == "__main__":
