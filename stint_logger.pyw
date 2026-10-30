@@ -41,7 +41,7 @@ except Exception:
 
 APP_NAME = "StintLogger"        # window title: also the single-instance key
 APP_REG_NAME = "StintLogger"   # HKCU Run entry name
-APP_VERSION = "1.4.0"           # tyre slip/forces/loads, tread temps, aid activity
+APP_VERSION = "1.4.1"           # drop slip/force columns AC leaves at zero
 
 def _writable(path):
     probe = os.path.join(path, ".stintlogger_write_test")

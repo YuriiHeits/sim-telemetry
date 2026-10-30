@@ -100,8 +100,10 @@ def detect_game():
 # -------------------------------------------------------------------- structures
 
 # Fields after clutch, identical in both games (Kunos layout, cross-checked
-# against PyAccSharedMemory). ACC leaves the tread temperatures, tyre forces and
-# aid flags empty, so those are only logged for AC.
+# against PyAccSharedMemory). ACC leaves the tread temperatures and aid flags
+# empty, so those are only logged for AC. mz/fx/fy/slipRatio/slipAngle are
+# declared only to keep offsets: AC 1.16.4 (sm 1.7) leaves them at zero while
+# driving, though currentMaxRpm right before them matches static maxRpm.
 _PHYS_TAIL = [
     ("tyreTempI", ctypes.c_float * 4), ("tyreTempM", ctypes.c_float * 4),
     ("tyreTempO", ctypes.c_float * 4), ("isAIControlled", ctypes.c_int32),
@@ -312,20 +314,14 @@ DRIFT_COLS = ["angvel_x", "angvel_y", "angvel_z", "yaw_rate",
 
 
 # Added in 1.4.0, after DRIFT_COLS, for drift and circuit setup work.
-#   slip_ang_*   physics.slipAngle per tyre, as the game reports it (docs: rad)
-#   slip_ratio_* physics.slipRatio per tyre
 #   lvel_*       physics.localVelocity, m/s, car-local axes
 #   final_ff     physics.finalFF, force feedback after the game's gain
 #   brake_bias   physics.brakeBias, front share
 #   max_rpm      static.maxRpm
-SETUP_COLS = ["slip_ang_fl", "slip_ang_fr", "slip_ang_rl", "slip_ang_rr",
-              "slip_ratio_fl", "slip_ratio_fr", "slip_ratio_rl", "slip_ratio_rr",
-              "lvel_x", "lvel_y", "lvel_z", "final_ff", "brake_bias", "max_rpm"]
+SETUP_COLS = ["lvel_x", "lvel_y", "lvel_z", "final_ff", "brake_bias", "max_rpm"]
 
 # AC only, last: ACC does not fill these.
 #   load_*       physics.wheelLoad, N
-#   fx_*, fy_*   physics.fx / fy, longitudinal and lateral tyre force, N
-#   mz_*         physics.mz, self-aligning torque, Nm
 #   ttemp_i/m/o_* physics.tyreTempI/M/O, inner / middle / outer tread, C
 #   tc_active, abs_active  physics.tcinAction / absInAction, 0/1
 #   ride_h_f/r   physics.rideHeight, m
@@ -333,8 +329,7 @@ SETUP_COLS = ["slip_ang_fl", "slip_ang_fr", "slip_ang_rl", "slip_ang_rr",
 #   tyre_r_*     static.tyreRadius, m
 #   susp_max_*   static.suspensionMaxTravel, m (compare with susp_*)
 _W = ("fl", "fr", "rl", "rr")
-AC_SETUP_COLS = (["load_" + w for w in _W] + ["fx_" + w for w in _W]
-                 + ["fy_" + w for w in _W] + ["mz_" + w for w in _W]
+AC_SETUP_COLS = (["load_" + w for w in _W]
                  + ["ttemp_i_" + w for w in _W] + ["ttemp_m_" + w for w in _W]
                  + ["ttemp_o_" + w for w in _W]
                  + ["tc_active", "abs_active", "ride_h_f", "ride_h_r", "max_turbo"]
@@ -466,13 +461,10 @@ class SimReader:
         xyz = self.player_coords()
         out += [_f(v, 3) for v in xyz] if xyz is not None else ["", "", ""]
         st, lv = self.stat, p.localVelocity
-        out += _f4(p.slipAngle, 4)
-        out += _f4(p.slipRatio, 4)
         out += [_f(lv[0], 4), _f(lv[1], 4), _f(lv[2], 4),
                 _f(p.finalFF, 3), _f(p.brakeBias, 3), st.maxRpm]
         if self.game == AC:
             out += _f4(p.wheelLoad, 1)
-            out += _f4(p.fx, 1) + _f4(p.fy, 1) + _f4(p.mz, 2)
             out += _f4(p.tyreTempI, 1) + _f4(p.tyreTempM, 1) + _f4(p.tyreTempO, 1)
             out += [p.tcinAction, p.absInAction, _f(p.rideHeight[0], 4),
                     _f(p.rideHeight[1], 4), _f(st.maxTurboBoost, 3)]

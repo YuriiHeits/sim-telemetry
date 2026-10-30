@@ -238,12 +238,10 @@ class TestDriftChannels(unittest.TestCase):
 
 
 class TestSetupChannels(unittest.TestCase):
-    """1.4.0: tyre forces, slip, local velocity, temperatures across the tread,
-    aid activity and car constants, appended after the 1.3.0 drift columns."""
+    """1.4.0: local velocity, wheel loads, temperatures across the tread, aid
+    activity and car constants, appended after the 1.3.0 drift columns."""
 
-    SHARED = ["slip_ang_fl", "slip_ang_fr", "slip_ang_rl", "slip_ang_rr",
-              "slip_ratio_fl", "slip_ratio_fr", "slip_ratio_rl", "slip_ratio_rr",
-              "lvel_x", "lvel_y", "lvel_z", "final_ff", "brake_bias", "max_rpm"]
+    SHARED = ["lvel_x", "lvel_y", "lvel_z", "final_ff", "brake_bias", "max_rpm"]
 
     def _reader(self, game):
         reader = sim_shm.SimReader(game)
@@ -276,9 +274,17 @@ class TestSetupChannels(unittest.TestCase):
             tail = self.SHARED + (sim_shm.AC_SETUP_COLS if game == AC else [])
             self.assertEqual(cols[start:], tail, game)
 
+    def test_channels_ac_leaves_empty_are_not_logged(self):
+        # AC 1.16.4 keeps these at zero while driving; the struct still declares
+        # them so the fields after stay in place
+        for game in (AC, ACC):
+            row = self._by_name(self._reader(game))
+            for col in ("slip_ang_fl", "slip_ratio_fl", "fx_fl", "fy_fl", "mz_fl"):
+                self.assertNotIn(col, row, (game, col))
+
     def test_ac_only_setup_columns_absent_in_acc(self):
         acc = sim_shm.cols_for(ACC)
-        for col in ("load_fl", "fy_fl", "ttemp_i_fl", "tc_active", "max_turbo",
+        for col in ("load_fl", "ttemp_i_fl", "tc_active", "max_turbo",
                     "tyre_r_fl", "susp_max_fl", "ride_h_f"):
             self.assertNotIn(col, acc)
 
@@ -295,9 +301,6 @@ class TestSetupChannels(unittest.TestCase):
     def test_shared_channels_land_in_their_columns(self):
         for game in (AC, ACC):
             row = self._by_name(self._reader(game))
-            self.assertEqual([row["slip_ang_" + w] for w in ("fl", "fr", "rl", "rr")],
-                             ["0.1000", "0.2000", "0.3000", "0.4000"], game)
-            self.assertEqual(row["slip_ratio_rr"], "-0.2000", game)
             self.assertEqual((row["lvel_x"], row["lvel_y"], row["lvel_z"]),
                              ("-3.5000", "0.2500", "22.0000"), game)
             self.assertEqual(row["final_ff"], "0.875", game)
@@ -307,8 +310,6 @@ class TestSetupChannels(unittest.TestCase):
     def test_ac_channels_land_in_their_columns(self):
         row = self._by_name(self._reader(AC))
         self.assertEqual(row["load_fr"], "3001.0")
-        self.assertEqual((row["fx_rl"], row["fy_rl"], row["mz_rl"]),
-                         ("102.0", "-202.0", "7.00"))
         self.assertEqual((row["ttemp_i_rr"], row["ttemp_m_rr"], row["ttemp_o_rr"]),
                          ("83.0", "78.0", "73.0"))
         self.assertEqual((row["tc_active"], row["abs_active"]), (1, 0))
