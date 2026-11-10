@@ -73,7 +73,13 @@ def brake_zones(rs):
             i += 1
     return zones
 
-def zone_metrics(seg):
+def front_locked(r):
+    """Front rim speed (wheel_w * tyre_r) clearly below car speed = wheel locking (v1.4 logs)."""
+    v = F(r, "speed_kmh") / 3.6
+    rim = min(F(r, "wheel_w_fl") * F(r, "tyre_r_fl"), F(r, "wheel_w_fr") * F(r, "tyre_r_fr"))
+    return v > 8 and rim < 0.85 * v
+
+def zone_metrics(seg, abs_live=False):
     speeds = [F(r, "speed_kmh") for r in seg]
     entry, vmin = speeds[0], min(speeds)
     peak = max(F(r, "brake") for r in seg)
@@ -89,8 +95,11 @@ def zone_metrics(seg):
     latv = [x for x in latv if x is not None]
     overlap = (sum(1 for x in latv if x > 0.6) / len(latv)) if latv else 0.0
     pos = st.median(F(r, "pos") for r in seg)
+    on = [r for r in seg if F(r, "brake") > 0.15] or seg
+    lock = sum(map(front_locked, on)) / len(on) if "tyre_r_fl" in seg[0] else None
+    absa = sum(1 for r in on if F(r, "abs_active") > 0) / len(on) if abs_live else None
     return dict(entry=entry, vmin=vmin, peak=peak, lat_release=lat_release,
-                steer_release=steer_release, overlap=overlap, pos=pos)
+                steer_release=steer_release, overlap=overlap, pos=pos, lock=lock, absa=absa)
 
 def cluster(zones):
     """Group zones (dicts) by track position into corners."""
@@ -111,11 +120,14 @@ best = 0.0
 for path in args:
     rows = load(path)
     good, b = valid_laps(rows)
+    # abs_active that never changes is not a real channel (AC often leaves it at 0)
+    abs_live = bool(rows) and "abs_active" in rows[0] and len({r["abs_active"] for r in rows}) > 1
+    abs_dead = bool(rows) and "abs_active" in rows[0] and not abs_live
     best = b if best == 0 else min(best, b)
     laps_used += len(good)
     for lp, d, rs in good:
         for seg in brake_zones(rs):
-            m = zone_metrics(seg)
+            m = zone_metrics(seg, abs_live)
             if m:
                 allz.append(m)
 
@@ -132,11 +144,20 @@ straight = sum(1 for z in allz if z["lat_release"] < 0.4)
 print("== SESSION TRAIL-BRAKING ==")
 print(f"lateral G at brake-release:  median {st.median(lr):.2f}g   (higher = still turning when you lift off)")
 print(f"braking-while-cornering:     median {st.median(ov)*100:.0f}% of each zone")
-print(f"'brake-straight-then-turn':  {straight}/{len(allz)} zones ({straight/len(allz)*100:.0f}%)  <- released while basically straight\n")
+print(f"'brake-straight-then-turn':  {straight}/{len(allz)} zones ({straight/len(allz)*100:.0f}%)  <- released while basically straight")
+HAS_LOCK = allz[0]["lock"] is not None
+HAS_ABS = allz[0]["absa"] is not None
+if HAS_LOCK:
+    print(f"front wheel locking:         median {st.median(z['lock'] for z in allz)*100:.0f}% of time on the brake (front rim < 85% of car speed)")
+if HAS_ABS:
+    print(f"ABS active:                  median {st.median(z['absa'] for z in allz)*100:.0f}% of time on the brake")
+elif abs_dead:
+    print("ABS active:                  abs_active never changes in this log -> not reliable, ignored")
+print()
 
 clusters = cluster(allz)
 print("== CORNER-BY-CORNER (grouped by track position) ==")
-print("pos  | seen | entry | vmin | peak | latG@rel | overlap | verdict")
+print("pos  | seen | entry | vmin | peak | latG@rel | overlap |" + (" lock |" if HAS_LOCK else "") + (" abs |" if HAS_ABS else "") + " verdict")
 def verdict(lr, ov):
     if lr >= 1.0 and ov >= 0.35: return "trail OK"
     if lr < 0.4: return "BRAKE-STRAIGHT (leak)"
@@ -152,7 +173,9 @@ for cl in clusters:
     lrm = st.median(z["lat_release"] for z in cl)
     ovm = st.median(z["overlap"] for z in cl)
     v = verdict(lrm, ovm)
-    print(f"{pos:4.2f} |  {len(cl):2}  | {entry:4.0f}  | {vmin:4.0f} | {peak:4.2f} |  {lrm:4.2f}g  |  {ovm*100:3.0f}%  | {v}")
+    extra = (f" {st.median(z['lock'] for z in cl)*100:3.0f}% |" if HAS_LOCK else "") + \
+            (f" {st.median(z['absa'] for z in cl)*100:3.0f}% |" if HAS_ABS else "")
+    print(f"{pos:4.2f} |  {len(cl):2}  | {entry:4.0f}  | {vmin:4.0f} | {peak:4.2f} |  {lrm:4.2f}g  |  {ovm*100:3.0f}%  |{extra} {v}")
     worst.append((lrm, pos, entry, vmin, v))
 
 print("\n== BIGGEST LEAKS (low latG@release, meaningful entry speed) ==")

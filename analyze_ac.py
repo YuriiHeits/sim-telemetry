@@ -93,7 +93,7 @@ if rows and "heading" in rows[0]:
         print(f"кут заносу:    у поворотах avg {sum(_corn)/len(_corn):.1f}°  макс {max(_corn):.0f}°")
 brk = [r for r in allrows if F(r, "brake") > 0.7]
 if brk:
-    print(f"гальмо:        ABS {sum(1 for r in brk if F(r,'abs')>0.01)/len(brk)*100:.0f}%, слип перед {sum(F(r,'slip_fl')+F(r,'slip_fr') for r in brk)/(2*len(brk)):.2f}")
+    print(f"гальмо:        ABS-налаштування увімкн. {sum(1 for r in brk if F(r,'abs')>0.01)/len(brk)*100:.0f}% (не втручання), слип перед {sum(F(r,'slip_fl')+F(r,'slip_fr') for r in brk)/(2*len(brk)):.2f}")
 ext = [r for r in allrows if F(r, "gas") > 0.6 and F(r, "speed_kmh") < 160]
 if ext:
     print(f"тяга на виході: слип зад {sum(F(r,'slip_rl')+F(r,'slip_rr') for r in ext)/(2*len(ext)):.2f}")
@@ -109,3 +109,33 @@ if rows and "tyres_out" in rows[0]:
             all4 += 1
         prev = n
     print(f"track limits:  {evt} виїздів (≥1 колесо за межами), з них {all4} з усіма 4 (анулює коло)")
+
+# v1.4 per-wheel channels: left/right asymmetry, tread edges, loads, aids
+WH = ("fl", "fr", "rl", "rr")
+if allrows and "ttemp_i_fl" in allrows[0]:
+    avg = lambda rs, k: sum(F(r, k) for r in rs) / len(rs) if rs else float("nan")
+    # gx < 0 = right-hander (left wheels loaded), checked against load_* on rt_mont_tremblant
+    rt = [r for r in allrows if F(r, "gx") < -1.0]
+    lt = [r for r in allrows if F(r, "gx") > 1.0]
+    print("\n== ПО КОЛЕСАХ (валідні кола) ==")
+    print(f"час у поворотах: праві {len(rt)/len(allrows)*100:.0f}%  ліві {len(lt)/len(allrows)*100:.0f}%")
+    print("кол | тиск  core | I    M    O  | load прав/лів")
+    for w in WH:
+        print(f" {w} | {avg(allrows,'press_'+w):5.2f} {avg(allrows,'ttemp_'+w):4.0f} | "
+              f"{avg(allrows,'ttemp_i_'+w):4.0f} {avg(allrows,'ttemp_m_'+w):4.0f} {avg(allrows,'ttemp_o_'+w):4.0f} | "
+              f"{avg(rt,'load_'+w):5.0f}/{avg(lt,'load_'+w):5.0f}")
+    dp = (avg(allrows, "press_fl") + avg(allrows, "press_rl") - avg(allrows, "press_fr") - avg(allrows, "press_rr")) / 2
+    dt = (avg(allrows, "ttemp_fl") + avg(allrows, "ttemp_rl") - avg(allrows, "ttemp_fr") - avg(allrows, "ttemp_rr")) / 2
+    print(f"ліво - право:  тиск {dp:+.2f} psi  core {dt:+.1f}°C")
+    for name, rs, fo, ro in (("праві", rt, "fl", "rl"), ("ліві", lt, "fr", "rr")):
+        if rs:
+            f_, r_ = avg(rs, "slip_" + fo), avg(rs, "slip_" + ro)
+            print(f"{name} повороти: слип зовн. перед {f_:.2f} / зад {r_:.2f}  -> {bal(f_, r_)}")
+    aids = []
+    for k, sel in (("abs_active", brk), ("tc_active", ext)):
+        vals = {r[k] for r in allrows}
+        if len(vals) == 1:
+            aids.append(f"{k} константа {next(iter(vals))} (недостовірно)")
+        elif sel:
+            aids.append(f"{k} {sum(1 for r in sel if F(r, k) > 0) / len(sel) * 100:.0f}%")
+    print("допомоги:      " + ", ".join(aids))

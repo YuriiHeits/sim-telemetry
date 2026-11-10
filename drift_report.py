@@ -107,3 +107,28 @@ if "tyres_out" in mv[0]:
     print("\n== ПОКРИТТЯ ==")
     print(f"виїзди за межі:    {out_evt} епізодів  (макс {maxout} коліс одночасно, {100*out_frames/len(mv):.0f}% часу хоч одне за межами)")
     print(f"бруд по колесах:   FL {dirt['fl']:.2f}  FR {dirt['fr']:.2f}  RL {dirt['rl']:.2f}  RR {dirt['rr']:.2f}  -> найчастіше на газоні {dirtiest.upper()}")
+
+# v1.3+/v1.4 channels: rear wheelspin, yaw rate, tyre temps, aids
+if "tyre_r_rl" in mv[0]:
+    W = ("fl", "fr", "rl", "rr")
+    avg = lambda rs, k: sum(F(r, k) for r in rs) / len(rs) if rs else float("nan")
+    rim = lambda r, w: F(r, "wheel_w_" + w) * F(r, "tyre_r_" + w)
+    # spin ratio: rear rim speed / car speed (1.0 = rolling, 2.0 = rear wheels turning twice as fast)
+    spin = [((rim(r, "rl") + rim(r, "rr")) / 2) / (F(r, "speed_kmh") / 3.6) for r in siderows if F(r, "speed_kmh") > 20]
+    print("\n== КОЛЕСА ==")
+    if spin:
+        print(f"пробуксовка зад у заносі: медіана ×{statistics.median(spin):.2f}  (90-й перцентиль ×{sorted(spin)[int(len(spin)*0.9)]:.2f}; 1.0 = котиться)")
+    if siderows:
+        yaw = [abs(math.degrees(F(r, "yaw_rate"))) for r in siderows]
+        print(f"|yaw rate| у заносі:      медіана {statistics.median(yaw):.0f}°/с  макс {max(yaw):.0f}°/с  (знак не перевірений)")
+    print("core / I-M-O, °C:        " + "  ".join(
+        f"{w.upper()} {avg(mv, 'ttemp_' + w):.0f} ({avg(mv, 'ttemp_i_' + w):.0f}/{avg(mv, 'ttemp_m_' + w):.0f}/{avg(mv, 'ttemp_o_' + w):.0f})" for w in W))
+    print("тиск, psi:               " + "  ".join(f"{w.upper()} {avg(mv, 'press_' + w):.1f}" for w in W))
+    if len({r["turbo_boost"] for r in mv}) > 1:
+        print(f"turbo_boost:             макс {max(F(r, 'turbo_boost') for r in mv):.2f} (одиниці гри)")
+    for k in ("tc_active", "abs_active"):
+        vals = {r[k] for r in mv}
+        if len(vals) == 1:
+            print(f"{k}:{' ' * (24 - len(k))}константа {next(iter(vals))} -> недостовірно")
+        else:
+            print(f"{k}:{' ' * (24 - len(k))}{sum(1 for r in mv if F(r, k) > 0) / len(mv) * 100:.0f}% часу руху")
